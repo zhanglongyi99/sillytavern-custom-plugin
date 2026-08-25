@@ -11,7 +11,14 @@
             </label>
             <small class="story-rewriter-setting-hint">在 AI 消息中选中文字后，在选区旁显示“局部改写”按钮。</small>
 
-            <label for="story_rewriter_context_chars">选区前后的参考文字数</label>
+            <label for="story_rewriter_context_mode">默认上下文模式</label>
+            <select id="story_rewriter_context_mode" class="text_pole">
+                <option value="tavern">完整酒馆上下文（推荐）</option>
+                <option value="local">局部快速模式</option>
+            </select>
+            <small class="story-rewriter-setting-hint">完整模式会沿用当前角色卡、世界书、作者注、扩展提示和聊天历史；局部模式只发送选区附近文字。</small>
+
+            <label for="story_rewriter_context_chars">局部参考文字数（单侧）</label>
             <input id="story_rewriter_context_chars" class="text_pole" type="number" min="0" max="8000" step="100">
 
             <label for="story_rewriter_response_length">最大响应 Token 数</label>

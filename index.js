@@ -1,6 +1,7 @@
 import { findSelectionRange, replaceRange } from './lib/selection.js';
 import {
     DEFAULT_SYSTEM_PROMPT,
+    buildFullContextRewritePrompt,
     buildRewritePrompt,
     cleanModelResponse,
     createRewriteTask,
@@ -9,8 +10,11 @@ import {
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
 const MAX_HISTORY = 5;
+const MAX_SESSION_TURNS = 8;
+const CONTEXT_MODES = new Set(['tavern', 'local']);
 const DEFAULT_SETTINGS = Object.freeze({
     enabled: true,
+    contextMode: 'tavern',
     contextCharacters: 2000,
     responseLength: 1024,
     persistentUndo: true,
@@ -22,7 +26,8 @@ const state = {
     settings: null,
     capture: null,
     actionButton: null,
-    modal: null,
+    panel: null,
+    session: null,
     snackbar: null,
     observer: null,
     observerQueued: false,
@@ -46,6 +51,7 @@ function loadSettings() {
         ...DEFAULT_SETTINGS,
         ...stored,
         enabled: stored.enabled ?? DEFAULT_SETTINGS.enabled,
+        contextMode: CONTEXT_MODES.has(stored.contextMode) ? stored.contextMode : DEFAULT_SETTINGS.contextMode,
         contextCharacters: clampNumber(stored.contextCharacters, 0, 8000, DEFAULT_SETTINGS.contextCharacters),
         responseLength: clampNumber(stored.responseLength, 64, 4096, DEFAULT_SETTINGS.responseLength),
         persistentUndo: stored.persistentUndo ?? DEFAULT_SETTINGS.persistentUndo,
@@ -67,10 +73,12 @@ async function mountSettings() {
     host.insertAdjacentHTML('beforeend', await response.text());
 
     const enabled = document.querySelector('#story_rewriter_enabled');
+    const contextMode = document.querySelector('#story_rewriter_context_mode');
     const contextCharacters = document.querySelector('#story_rewriter_context_chars');
     const responseLength = document.querySelector('#story_rewriter_response_length');
     const persistentUndo = document.querySelector('#story_rewriter_persistent_undo');
     enabled.checked = state.settings.enabled;
+    contextMode.value = state.settings.contextMode;
     contextCharacters.value = String(state.settings.contextCharacters);
     responseLength.value = String(state.settings.responseLength);
     persistentUndo.checked = state.settings.persistentUndo;
@@ -78,6 +86,10 @@ async function mountSettings() {
     enabled.addEventListener('change', () => {
         state.settings.enabled = enabled.checked;
         if (!enabled.checked) hideActionButton();
+        saveSettings();
+    });
+    contextMode.addEventListener('change', () => {
+        state.settings.contextMode = CONTEXT_MODES.has(contextMode.value) ? contextMode.value : DEFAULT_SETTINGS.contextMode;
         saveSettings();
     });
     contextCharacters.addEventListener('change', () => {
@@ -105,7 +117,7 @@ function createActionButton() {
     button.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i><span>局部改写</span>';
     button.hidden = true;
     button.addEventListener('mousedown', event => event.preventDefault());
-    button.addEventListener('click', () => openRewriteDialog());
+    button.addEventListener('click', () => openRewriteWorkspace());
     document.body.append(button);
     state.actionButton = button;
 }
@@ -131,7 +143,7 @@ function closestMessageText(node) {
 }
 
 function captureSelection() {
-    if (!state.active || !state.settings.enabled || state.modal) return hideActionButton();
+    if (!state.active || !state.settings.enabled) return hideActionButton();
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed || selection.rangeCount !== 1) return hideActionButton();
     const range = selection.getRangeAt(0);
@@ -174,67 +186,141 @@ function onSelectionGesture(event) {
     window.setTimeout(captureSelection, 0);
 }
 
-function makeButton(label, className = '') {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = `menu_button story-rewriter-dialog-button ${className}`.trim();
-    button.textContent = label;
-    return button;
-}
-
-function closeDialog() {
-    state.modal?.remove();
-    state.modal = null;
+function closeWorkspace() {
+    state.panel?.remove();
+    state.panel = null;
+    state.session = null;
     hideActionButton();
 }
 
-function setDialogBusy(dialog, busy, status = '') {
-    dialog.dataset.busy = String(busy);
-    dialog.querySelectorAll('button').forEach(element => {
+function setWorkspaceBusy(panel, busy, status = '') {
+    panel.dataset.busy = String(busy);
+    panel.querySelectorAll('button, select').forEach(element => {
         element.disabled = busy;
     });
-    dialog.querySelectorAll('textarea').forEach(element => {
+    panel.querySelectorAll('textarea').forEach(element => {
         if (!element.classList.contains('story-rewriter-original')) element.disabled = busy;
     });
     if (!busy) {
-        const candidate = dialog.querySelector('.story-rewriter-candidate');
-        dialog.querySelector('.story-rewriter-apply').disabled = !candidate.value.trim();
+        const candidate = panel.querySelector('.story-rewriter-candidate');
+        panel.querySelector('.story-rewriter-apply').disabled = !candidate.value.trim();
     }
-    dialog.querySelector('.story-rewriter-status').textContent = status;
+    panel.querySelector('.story-rewriter-status').textContent = status;
 }
 
-async function generateCandidate(dialog) {
-    const instruction = dialog.querySelector('.story-rewriter-instruction').value.trim();
+function renderSessionTurns(panel) {
+    const host = panel.querySelector('.story-rewriter-turns');
+    host.replaceChildren();
+    for (const [index, turn] of state.session.turns.entries()) {
+        const card = document.createElement('article');
+        card.className = 'story-rewriter-turn';
+        const requestLabel = document.createElement('strong');
+        requestLabel.textContent = `第 ${index + 1} 轮要求`;
+        const request = document.createElement('p');
+        request.textContent = turn.instruction;
+        const resultLabel = document.createElement('strong');
+        resultLabel.textContent = '候选摘要';
+        const result = document.createElement('p');
+        result.textContent = turn.candidate.length > 180 ? `${turn.candidate.slice(0, 180)}…` : turn.candidate;
+        const restore = document.createElement('button');
+        restore.type = 'button';
+        restore.className = 'menu_button story-rewriter-restore-candidate';
+        restore.textContent = '恢复这个候选';
+        restore.addEventListener('click', () => {
+            state.session.candidate = turn.candidate;
+            panel.querySelector('.story-rewriter-candidate').value = turn.candidate;
+            panel.querySelector('.story-rewriter-preview').hidden = false;
+            panel.querySelector('.story-rewriter-apply').disabled = false;
+            panel.querySelector('.story-rewriter-status').textContent = `已恢复第 ${index + 1} 轮候选。`;
+        });
+        card.append(requestLabel, request, resultLabel, result, restore);
+        host.append(card);
+    }
+    host.hidden = state.session.turns.length === 0;
+}
+
+function updateContextSummary(panel) {
+    const fullContext = state.session.contextMode === 'tavern';
+    panel.querySelector('.story-rewriter-context-summary').textContent = fullContext
+        ? '角色卡 · 世界书 · 作者注 · 扩展提示 · 当前聊天历史'
+        : `仅选区前后各 ${state.settings.contextCharacters} 字`;
+    const timelineNotice = panel.querySelector('.story-rewriter-timeline-notice');
+    timelineNotice.hidden = !fullContext || state.session.capture.messageId >= state.context.chat.length - 1;
+}
+
+function buildSessionTask(instruction, panel) {
+    const { capture } = state.session;
+    const task = createRewriteTask(capture.messageText, capture.range, instruction, state.settings.contextCharacters);
+    return {
+        ...task,
+        constraints: panel.querySelector('.story-rewriter-constraints').value.trim(),
+        previousCandidate: panel.querySelector('.story-rewriter-candidate').value.trim() || state.session.candidate,
+        previousInstructions: state.session.requirements.slice(-MAX_SESSION_TURNS),
+    };
+}
+
+async function generateCandidate(panel) {
+    const session = state.session;
+    const instructionInput = panel.querySelector('.story-rewriter-instruction');
+    const instruction = instructionInput.value.trim();
     if (!instruction) {
-        dialog.querySelector('.story-rewriter-status').textContent = '请先输入修改要求。';
+        panel.querySelector('.story-rewriter-status').textContent = '请先输入本轮修改要求。';
         return;
     }
-    const capture = state.capture;
+    const capture = session?.capture;
     if (!capture || capture.message.mes !== capture.messageText) {
-        dialog.querySelector('.story-rewriter-status').textContent = '原消息已变化，请关闭后重新选择。';
+        panel.querySelector('.story-rewriter-status').textContent = '原消息已变化，请关闭工作台后重新选择。';
         return;
     }
 
-    setDialogBusy(dialog, true, '正在调用当前模型…');
+    setWorkspaceBusy(panel, true, session.contextMode === 'tavern'
+        ? '正在通过酒馆完整上下文调用当前模型…'
+        : '正在通过局部上下文调用当前模型…');
     try {
-        const task = createRewriteTask(capture.messageText, capture.range, instruction, state.settings.contextCharacters);
-        const response = await state.context.generateRaw({
-            systemPrompt: DEFAULT_SYSTEM_PROMPT,
-            prompt: buildRewritePrompt(task),
-            responseLength: state.settings.responseLength,
-            trimNames: false,
-        });
+        const task = buildSessionTask(instruction, panel);
+        let response;
+        if (session.contextMode === 'tavern') {
+            if (typeof state.context.generateQuietPrompt !== 'function') {
+                throw new Error('当前 SillyTavern 不提供完整上下文后台生成接口。');
+            }
+            response = await state.context.generateQuietPrompt({
+                quietPrompt: buildFullContextRewritePrompt(task),
+                quietToLoud: false,
+                skipWIAN: false,
+                responseLength: state.settings.responseLength,
+                removeReasoning: true,
+                trimToSentence: false,
+            });
+        } else {
+            response = await state.context.generateRaw({
+                systemPrompt: DEFAULT_SYSTEM_PROMPT,
+                prompt: buildRewritePrompt(task),
+                responseLength: state.settings.responseLength,
+                trimNames: false,
+            });
+        }
         const candidate = cleanModelResponse(response);
         if (!candidate) throw new Error('模型返回了空内容。');
-        dialog.querySelector('.story-rewriter-candidate').value = candidate;
-        dialog.querySelector('.story-rewriter-preview').hidden = false;
-        dialog.querySelector('.story-rewriter-apply').disabled = false;
-        dialog.querySelector('.story-rewriter-status').textContent = '候选结果已生成，可编辑后再替换。';
+        if (state.session !== session || !panel.isConnected) return;
+        session.candidate = candidate;
+        session.constraints = task.constraints;
+        session.requirements.push(instruction);
+        if (session.requirements.length > MAX_SESSION_TURNS) session.requirements.shift();
+        session.turns.push({ instruction, candidate, createdAt: new Date().toISOString() });
+        if (session.turns.length > MAX_SESSION_TURNS) session.turns.shift();
+        panel.querySelector('.story-rewriter-candidate').value = candidate;
+        panel.querySelector('.story-rewriter-preview').hidden = false;
+        panel.querySelector('.story-rewriter-apply').disabled = false;
+        instructionInput.value = '';
+        renderSessionTurns(panel);
+        panel.querySelector('.story-rewriter-status').textContent = '候选已生成。可以继续提出要求，或确认替换。';
     } catch (error) {
         console.error('[Story Rewriter] generation failed', error);
-        dialog.querySelector('.story-rewriter-status').textContent = `生成失败：${error.message ?? error}`;
+        panel.querySelector('.story-rewriter-status').textContent = `生成失败：${error.message ?? error}`;
     } finally {
-        setDialogBusy(dialog, false, dialog.querySelector('.story-rewriter-status').textContent);
+        if (panel.isConnected && state.panel === panel) {
+            setWorkspaceBusy(panel, false, panel.querySelector('.story-rewriter-status').textContent);
+        }
     }
 }
 
@@ -261,9 +347,8 @@ function updateHistory(message, history) {
 async function persistMessageText(message, nextText, previousText) {
     const messageId = state.context.chat.indexOf(message);
     if (messageId < 0) throw new Error('目标消息已不在当前聊天中。');
-    const previousSwipe = Array.isArray(message.swipes) && Number.isInteger(message.swipe_id)
-        ? message.swipes[message.swipe_id]
-        : undefined;
+    const hadSwipe = Array.isArray(message.swipes) && Number.isInteger(message.swipe_id);
+    const previousSwipe = hadSwipe ? message.swipes[message.swipe_id] : undefined;
     const hadDisplayText = Object.hasOwn(message.extra ?? {}, 'display_text');
     const previousDisplayText = message.extra?.display_text;
     const previousTainted = state.context.chatMetadata?.tainted;
@@ -285,7 +370,7 @@ async function persistMessageText(message, nextText, previousText) {
         ensureUndoButtons();
     } catch (error) {
         message.mes = previousText;
-        if (previousSwipe !== undefined) message.swipes[message.swipe_id] = previousSwipe;
+        if (hadSwipe) message.swipes[message.swipe_id] = previousSwipe;
         if (message.extra) {
             if (hadDisplayText) message.extra.display_text = previousDisplayText;
             else delete message.extra.display_text;
@@ -296,10 +381,10 @@ async function persistMessageText(message, nextText, previousText) {
     }
 }
 
-async function applyCandidate(dialog) {
-    const candidate = dialog.querySelector('.story-rewriter-candidate').value.trim();
+async function applyCandidate(panel) {
+    const candidate = panel.querySelector('.story-rewriter-candidate').value.trim();
     if (!candidate) return notify('候选内容不能为空。', 'warning');
-    const capture = state.capture;
+    const capture = state.session?.capture;
     if (!capture || capture.message.mes !== capture.messageText) {
         return notify('原消息已变化，未执行替换。', 'warning');
     }
@@ -308,58 +393,131 @@ async function applyCandidate(dialog) {
     const originalSelection = previousText.slice(capture.range.start, capture.range.end);
     const nextText = replaceRange(previousText, capture.range, candidate);
     const history = getHistory(capture.message);
+    const previousHistory = history.slice();
     history.push({
         start: capture.range.start,
         before: originalSelection,
         after: candidate,
+        instruction: state.session.requirements.join('\n'),
+        constraints: panel.querySelector('.story-rewriter-constraints').value.trim(),
+        contextMode: state.session.contextMode,
         createdAt: new Date().toISOString(),
     });
     while (history.length > MAX_HISTORY) history.shift();
     updateHistory(capture.message, history);
 
+    setWorkspaceBusy(panel, true, '正在写回并保存聊天…');
     try {
         await persistMessageText(capture.message, nextText, previousText);
-        closeDialog();
+        closeWorkspace();
         showUndoSnackbar(capture.message);
         notify('已替换选中片段。', 'success');
     } catch (error) {
-        history.pop();
+        history.splice(0, history.length, ...previousHistory);
         updateHistory(capture.message, history);
+        ensureUndoButtons();
         notify(`替换失败：${error.message ?? error}`, 'error');
+        if (panel.isConnected && state.panel === panel) {
+            setWorkspaceBusy(panel, false, `替换失败：${error.message ?? error}`);
+        }
     }
 }
 
-function openRewriteDialog() {
-    if (!state.capture || state.modal) return;
+function openRewriteWorkspace() {
+    if (!state.capture) return;
+    closeWorkspace();
     hideActionButton();
-    const backdrop = document.createElement('div');
-    backdrop.className = 'story-rewriter-ui story-rewriter-backdrop';
-    backdrop.innerHTML = `
-        <section class="story-rewriter-dialog" role="dialog" aria-modal="true" aria-labelledby="story-rewriter-title">
-            <header><h3 id="story-rewriter-title">故事局部改写</h3><button type="button" class="story-rewriter-close" aria-label="关闭">×</button></header>
-            <label>原文选区</label>
-            <textarea class="text_pole story-rewriter-original" rows="5" readonly></textarea>
-            <label>修改要求</label>
-            <textarea class="text_pole story-rewriter-instruction" rows="4" placeholder="例如：保留事件不变，改成更克制、更紧张的第三人称描写。"></textarea>
-            <div class="story-rewriter-actions"><button type="button" class="menu_button story-rewriter-generate">生成候选</button><button type="button" class="menu_button story-rewriter-cancel">取消</button></div>
-            <div class="story-rewriter-preview" hidden><label>候选替换文本（可手动编辑）</label><textarea class="text_pole story-rewriter-candidate" rows="8"></textarea><div class="story-rewriter-actions"><button type="button" class="menu_button story-rewriter-apply" disabled>确认替换</button><button type="button" class="menu_button story-rewriter-regenerate">重新生成</button></div></div>
-            <div class="story-rewriter-status" role="status" aria-live="polite"></div>
-        </section>`;
-    backdrop.querySelector('.story-rewriter-original').value = state.capture.range.rawText;
-    backdrop.querySelector('.story-rewriter-close').addEventListener('click', closeDialog);
-    backdrop.querySelector('.story-rewriter-cancel').addEventListener('click', closeDialog);
-    backdrop.querySelector('.story-rewriter-generate').addEventListener('click', () => generateCandidate(backdrop));
-    backdrop.querySelector('.story-rewriter-regenerate').addEventListener('click', () => generateCandidate(backdrop));
-    backdrop.querySelector('.story-rewriter-apply').addEventListener('click', () => applyCandidate(backdrop));
-    backdrop.querySelector('.story-rewriter-candidate').addEventListener('input', event => {
-        backdrop.querySelector('.story-rewriter-apply').disabled = !event.currentTarget.value.trim();
+    const capture = {
+        ...state.capture,
+        range: { ...state.capture.range },
+    };
+    state.session = {
+        capture,
+        contextMode: state.settings.contextMode,
+        constraints: '',
+        requirements: [],
+        candidate: '',
+        turns: [],
+    };
+
+    const panel = document.createElement('aside');
+    panel.id = 'story-rewriter-panel';
+    panel.className = 'story-rewriter-ui story-rewriter-panel';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-labelledby', 'story-rewriter-title');
+    panel.innerHTML = `
+        <header class="story-rewriter-panel-header">
+            <div><h3 id="story-rewriter-title">故事局部改写</h3><small>消息 #${capture.messageId}</small></div>
+            <button type="button" class="story-rewriter-close" aria-label="关闭">×</button>
+        </header>
+        <div class="story-rewriter-panel-body">
+            <section class="story-rewriter-context-card">
+                <label for="story-rewriter-session-context">本次使用的上下文</label>
+                <select id="story-rewriter-session-context" class="text_pole story-rewriter-context-mode">
+                    <option value="tavern">完整酒馆上下文（推荐）</option>
+                    <option value="local">局部快速模式</option>
+                </select>
+                <small class="story-rewriter-context-summary"></small>
+                <small class="story-rewriter-timeline-notice">目标是历史消息；完整模式会参考它之后的现有剧情，以减少前后冲突。</small>
+            </section>
+
+            <details open>
+                <summary>目标原文</summary>
+                <textarea class="text_pole story-rewriter-original" rows="6" readonly></textarea>
+            </details>
+
+            <label for="story-rewriter-constraints">必须持续保留的约束（可选）</label>
+            <textarea id="story-rewriter-constraints" class="text_pole story-rewriter-constraints" rows="3" placeholder="例如：不改变事件顺序、人物关系和第三人称视角。"></textarea>
+
+            <div class="story-rewriter-turns" aria-label="本次编辑历史" hidden></div>
+
+            <section class="story-rewriter-preview" hidden>
+                <h4>原文与当前候选</h4>
+                <div class="story-rewriter-compare">
+                    <div><span>原文</span><pre class="story-rewriter-compare-original"></pre></div>
+                    <div><label for="story-rewriter-candidate">候选（可编辑）</label><textarea id="story-rewriter-candidate" class="text_pole story-rewriter-candidate" rows="10"></textarea></div>
+                </div>
+            </section>
+        </div>
+        <footer class="story-rewriter-panel-footer">
+            <label for="story-rewriter-instruction">本轮修改要求</label>
+            <textarea id="story-rewriter-instruction" class="text_pole story-rewriter-instruction" rows="3" placeholder="第一次可以说明完整目标；之后可输入“再克制一点”等继续调整。"></textarea>
+            <div class="story-rewriter-actions">
+                <button type="button" class="menu_button story-rewriter-generate">生成候选</button>
+                <button type="button" class="menu_button story-rewriter-apply" disabled>确认替换</button>
+            </div>
+            <div class="story-rewriter-status" role="status" aria-live="polite">选区只决定修改范围；上下文由上方模式决定。</div>
+        </footer>`;
+
+    panel.querySelector('.story-rewriter-original').value = capture.range.rawText;
+    panel.querySelector('.story-rewriter-compare-original').textContent = capture.range.rawText;
+    const contextMode = panel.querySelector('.story-rewriter-context-mode');
+    contextMode.value = state.session.contextMode;
+    contextMode.addEventListener('change', () => {
+        state.session.contextMode = CONTEXT_MODES.has(contextMode.value) ? contextMode.value : DEFAULT_SETTINGS.contextMode;
+        state.settings.contextMode = state.session.contextMode;
+        const settingsContextMode = document.querySelector('#story_rewriter_context_mode');
+        if (settingsContextMode) settingsContextMode.value = state.settings.contextMode;
+        saveSettings();
+        updateContextSummary(panel);
     });
-    backdrop.addEventListener('mousedown', event => {
-        if (event.target === backdrop) closeDialog();
+    panel.querySelector('.story-rewriter-close').addEventListener('click', closeWorkspace);
+    panel.querySelector('.story-rewriter-generate').addEventListener('click', () => generateCandidate(panel));
+    panel.querySelector('.story-rewriter-apply').addEventListener('click', () => applyCandidate(panel));
+    panel.querySelector('.story-rewriter-candidate').addEventListener('input', event => {
+        state.session.candidate = event.currentTarget.value;
+        panel.querySelector('.story-rewriter-apply').disabled = !event.currentTarget.value.trim();
     });
-    document.body.append(backdrop);
-    state.modal = backdrop;
-    backdrop.querySelector('.story-rewriter-instruction').focus();
+    panel.querySelector('.story-rewriter-instruction').addEventListener('keydown', event => {
+        if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+            event.preventDefault();
+            void generateCandidate(panel);
+        }
+    });
+    document.body.append(panel);
+    state.panel = panel;
+    updateContextSummary(panel);
+    panel.querySelector('.story-rewriter-instruction').focus();
 }
 
 function findUndoStart(text, entry) {
@@ -386,6 +544,7 @@ async function undoMessage(message) {
     } catch (error) {
         history.push(entry);
         updateHistory(message, history);
+        ensureUndoButtons();
         notify(`撤销失败：${error.message ?? error}`, 'error');
     }
 }
@@ -451,7 +610,7 @@ function onDocumentClick(event) {
 }
 
 function onKeyDown(event) {
-    if (event.key === 'Escape' && state.modal) closeDialog();
+    if (event.key === 'Escape' && state.panel && state.panel.dataset.busy !== 'true') closeWorkspace();
 }
 
 export async function activate() {
@@ -487,7 +646,7 @@ export function deactivate() {
     state.observer = null;
     state.actionButton?.remove();
     state.actionButton = null;
-    closeDialog();
+    closeWorkspace();
     state.snackbar?.remove();
     state.snackbar = null;
     document.querySelector('#story_rewriter_settings')?.remove();
