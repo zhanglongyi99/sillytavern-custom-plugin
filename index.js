@@ -5,6 +5,7 @@ import {
     buildRewritePrompt,
     cleanModelResponse,
     createRewriteTask,
+    REPLACEMENT_JSON_SCHEMA,
 } from './lib/rewrite.js';
 
 const EXTENSION_KEY = 'story_rewriter';
@@ -288,6 +289,7 @@ async function generateCandidate(panel) {
                 quietToLoud: false,
                 skipWIAN: false,
                 responseLength: state.settings.responseLength,
+                jsonSchema: REPLACEMENT_JSON_SCHEMA,
                 removeReasoning: true,
                 trimToSentence: false,
             });
@@ -296,6 +298,7 @@ async function generateCandidate(panel) {
                 systemPrompt: DEFAULT_SYSTEM_PROMPT,
                 prompt: buildRewritePrompt(task),
                 responseLength: state.settings.responseLength,
+                jsonSchema: REPLACEMENT_JSON_SCHEMA,
                 trimNames: false,
             });
         }

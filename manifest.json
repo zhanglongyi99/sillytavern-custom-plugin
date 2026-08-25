@@ -10,7 +10,7 @@
     "disable": "deactivate"
   },
   "author": "zhanglongyi99",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "homePage": "https://github.com/zhanglongyi99/sillytavern-custom-plugin",
   "auto_update": true,
   "minimum_client_version": "1.17.0"
