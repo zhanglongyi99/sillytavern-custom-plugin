@@ -1,0 +1,17 @@
+{
+  "name": "sillytavern-custom-plugin",
+  "version": "0.1.0",
+  "description": "Selection-based AI rewriting for SillyTavern messages.",
+  "type": "module",
+  "scripts": {
+    "check": "node --check index.js && node --check lib/selection.js && node --check lib/rewrite.js",
+    "test": "node --test"
+  },
+  "keywords": [
+    "sillytavern",
+    "extension",
+    "rewrite",
+    "story-editing"
+  ],
+  "license": "MIT"
+}

@@ -1,0 +1,27 @@
+<div id="story_rewriter_settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>故事局部改写</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <label class="checkbox_label" for="story_rewriter_enabled">
+                <input id="story_rewriter_enabled" type="checkbox">
+                <span>启用选区局部改写</span>
+            </label>
+            <small class="story-rewriter-setting-hint">在 AI 消息中选中文字后，在选区旁显示“局部改写”按钮。</small>
+
+            <label for="story_rewriter_context_chars">选区前后的参考文字数</label>
+            <input id="story_rewriter_context_chars" class="text_pole" type="number" min="0" max="8000" step="100">
+
+            <label for="story_rewriter_response_length">最大响应 Token 数</label>
+            <input id="story_rewriter_response_length" class="text_pole" type="number" min="64" max="4096" step="64">
+
+            <label class="checkbox_label" for="story_rewriter_persistent_undo">
+                <input id="story_rewriter_persistent_undo" type="checkbox">
+                <span>在消息工具栏保留撤销入口</span>
+            </label>
+            <small class="story-rewriter-setting-hint">最近 5 次替换记录会保存在聊天消息中，用于跨刷新撤销。</small>
+        </div>
+    </div>
+</div>
