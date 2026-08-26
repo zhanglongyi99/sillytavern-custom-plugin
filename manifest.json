@@ -1,5 +1,5 @@
 {
-  "display_name": "故事局部改写",
+  "display_name": "故事改写",
   "loading_order": 110,
   "requires": [],
   "optional": [],
@@ -10,7 +10,7 @@
     "disable": "deactivate"
   },
   "author": "zhanglongyi99",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "homePage": "https://github.com/zhanglongyi99/sillytavern-custom-plugin",
   "auto_update": true,
   "minimum_client_version": "1.17.0"

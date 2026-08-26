@@ -16,3 +16,8 @@ test('declares the standard SillyTavern frontend extension entry points', () => 
     assert.equal(manifest.hooks.disable, 'deactivate');
     assert.equal(manifest.minimum_client_version, '1.17.0');
 });
+
+test('publishes the semantic rewrite release metadata', () => {
+    assert.equal(manifest.version, '0.3.0');
+    assert.equal(manifest.display_name, '故事改写');
+});

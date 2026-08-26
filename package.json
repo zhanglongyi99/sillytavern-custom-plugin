@@ -1,10 +1,10 @@
 {
   "name": "sillytavern-custom-plugin",
-  "version": "0.2.1",
-  "description": "Full-context, selection-based story rewriting for SillyTavern messages.",
+  "version": "0.3.0",
+  "description": "Source-grounded precise and semantic story rewriting for SillyTavern messages.",
   "type": "module",
   "scripts": {
-    "check": "node --check index.js && node --check lib/selection.js && node --check lib/rewrite.js && node --input-type=module -e \"await import('./index.js')\"",
+    "check": "node --check index.js && node --check lib/selection.js && node --check lib/rewrite.js && node --check lib/semantic.js && node --check lib/swipe.js && node --input-type=module -e \"await import('./index.js')\"",
     "test": "node --test"
   },
   "keywords": [

@@ -7,9 +7,9 @@
         <div class="inline-drawer-content">
             <label class="checkbox_label" for="story_rewriter_enabled">
                 <input id="story_rewriter_enabled" type="checkbox">
-                <span>启用选区局部改写</span>
+                <span>启用故事改写工具</span>
             </label>
-            <small class="story-rewriter-setting-hint">在 AI 消息中选中文字后，在选区旁显示“局部改写”按钮。</small>
+            <small class="story-rewriter-setting-hint">选中文字后提供精确替换和柔性重构；AI 消息工具栏提供全文重构。</small>
 
             <label for="story_rewriter_context_mode">默认上下文模式</label>
             <select id="story_rewriter_context_mode" class="text_pole">
@@ -23,6 +23,33 @@
 
             <label for="story_rewriter_response_length">最大响应 Token 数</label>
             <input id="story_rewriter_response_length" class="text_pole" type="number" min="64" max="4096" step="64">
+            <small class="story-rewriter-setting-hint">用于精确局部替换。</small>
+
+            <label for="story_rewriter_full_response_length">完整候选最大 Token 数</label>
+            <input id="story_rewriter_full_response_length" class="text_pole" type="number" min="512" max="16384" step="256">
+            <small class="story-rewriter-setting-hint">柔性和全文重构会根据原文长度动态使用该上限。</small>
+
+            <label for="story_rewriter_default_influence">重构默认影响强度</label>
+            <select id="story_rewriter_default_influence" class="text_pole">
+                <option value="strict">严格局部</option>
+                <option value="semantic">语义关联（推荐）</option>
+                <option value="broad">广泛重构</option>
+            </select>
+
+            <label class="checkbox_label" for="story_rewriter_confirm_impact">
+                <input id="story_rewriter_confirm_impact" type="checkbox">
+                <span>生成前确认 Agent 识别的影响范围</span>
+            </label>
+            <small class="story-rewriter-setting-hint">关闭时会自动完成分析与生成；开启后可以取消圈外关联区域。</small>
+
+            <label for="story_rewriter_retrieval_chars">按需资料字符预算</label>
+            <input id="story_rewriter_retrieval_chars" class="text_pole" type="number" min="1000" max="50000" step="1000">
+
+            <label for="story_rewriter_retrieval_results">按需资料最大条数</label>
+            <input id="story_rewriter_retrieval_results" class="text_pole" type="number" min="3" max="40" step="1">
+
+            <label for="story_rewriter_analysis_length">影响分析最大 Token 数</label>
+            <input id="story_rewriter_analysis_length" class="text_pole" type="number" min="512" max="4096" step="128">
 
             <label class="checkbox_label" for="story_rewriter_persistent_undo">
                 <input id="story_rewriter_persistent_undo" type="checkbox">
