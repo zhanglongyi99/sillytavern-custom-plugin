@@ -52,6 +52,10 @@ test('continues long plain-text revisions instead of wrapping the article in JSO
     assert.match(runtime, /parseRevisionTextSegment/);
     assert.match(runtime, /mergeRevisionContinuation/);
     assert.match(runtime, /正文达到单次响应上限，正在自动续接/);
+    assert.match(runtime, /removeReasoning: false/);
+    assert.match(runtime, /getTavernReasoningRuntime/);
+    assert.match(runtime, /removeReasoningFromString/);
+    assert.match(runtime, /模型首轮只返回了推理或空内容，正在自动重试正文/);
     assert.doesNotMatch(runtime, /generateStructured\([\s\S]{0,160}REVISION_JSON_SCHEMA/);
 });
 

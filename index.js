@@ -71,6 +71,7 @@ const state = {
 };
 
 let tavernRuntimePromise = null;
+let tavernReasoningRuntimePromise = null;
 
 function refreshContext() {
     const context = globalThis.SillyTavern?.getContext?.();
@@ -87,6 +88,17 @@ async function getTavernRuntime() {
         });
     }
     return tavernRuntimePromise;
+}
+
+async function getTavernReasoningRuntime() {
+    if (!tavernReasoningRuntimePromise) {
+        const runtimeUrl = new URL('../../../../scripts/reasoning.js', import.meta.url);
+        tavernReasoningRuntimePromise = import(runtimeUrl.href).catch(error => {
+            console.warn('[Story Rewriter] unable to load SillyTavern reasoning parser', error);
+            return null;
+        });
+    }
+    return tavernReasoningRuntimePromise;
 }
 
 async function getActiveGenerationLimits() {
@@ -789,7 +801,10 @@ async function generatePlain(prompt, responseLength, session) {
             quietToLoud: false,
             skipWIAN: false,
             responseLength,
-            removeReasoning: true,
+            // Some model/preset combinations classify the entire final answer as
+            // reasoning. Keep the raw text here and remove only explicit blocks
+            // in parseRevisionTextSegment so valid story text is not erased.
+            removeReasoning: false,
             trimToSentence: false,
         });
     } else {
@@ -802,7 +817,15 @@ async function generatePlain(prompt, responseLength, session) {
         });
     }
     if (session.cancelled) throw new Error('已取消本次生成。');
-    return String(response ?? '');
+    const raw = String(response ?? '');
+    try {
+        const reasoningRuntime = await getTavernReasoningRuntime();
+        const cleaned = reasoningRuntime?.removeReasoningFromString?.(raw);
+        if (typeof cleaned === 'string' && cleaned !== raw) return cleaned;
+    } catch (error) {
+        console.warn('[Story Rewriter] current reasoning parser failed; using explicit-tag cleanup', error);
+    }
+    return raw;
 }
 
 function getEffectiveImpactPlan(plan) {
@@ -1176,8 +1199,26 @@ async function generateCompleteRevision(panel, instruction) {
                 break;
             }
             const responseLength = Math.min(remainingBudget, availableOutput, singleResponseLimit);
-            const raw = await generatePlain(prompt, responseLength, session);
-            const parsed = parseRevisionTextSegment(raw);
+            let parsed = { text: '', complete: false };
+            for (let emptyAttempt = 0; emptyAttempt < 2; emptyAttempt++) {
+                const requestPrompt = emptyAttempt === 0 ? prompt : [
+                    prompt,
+                    '<empty_response_retry>',
+                    '上一次响应没有任何可用正文，可能只生成了推理内容或空的结束标记。不要分析，不要说明原因；立即从正文第一个字符（续接时为下一个字符）开始输出，并在真正完成后追加结束标记。',
+                    '</empty_response_retry>',
+                ].join('\n\n');
+                const raw = await generatePlain(requestPrompt, responseLength, session);
+                parsed = parseRevisionTextSegment(raw);
+                if (parsed.text || (parsed.complete && assembled)) break;
+                console.warn('[Story Rewriter] model returned no usable revision text', {
+                    segment: segments + 1,
+                    attempt: emptyAttempt + 1,
+                    responseCharacters: raw.length,
+                });
+                if (emptyAttempt === 0) {
+                    panel.querySelector('.story-rewriter-status').textContent = '模型首轮只返回了推理或空内容，正在自动重试正文…';
+                }
+            }
             if (parsed.text) {
                 assembled = segments === 0
                     ? parsed.text.trim()
@@ -1185,7 +1226,7 @@ async function generateCompleteRevision(panel, instruction) {
             }
             complete = parsed.complete;
             segments++;
-            if (!assembled && !complete) throw new Error('模型没有返回可用的完整候选正文。');
+            if (!assembled) throw new Error('模型连续两次只返回了推理或空内容。请检查当前预设的推理格式与最大响应 Token，或稍后重试。');
             if (complete) break;
 
             const usedTokens = await countTokens(assembled);

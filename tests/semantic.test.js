@@ -159,6 +159,18 @@ test('parses terminal markers and detects an incomplete plain-text revision', ()
         parseRevisionTextSegment('\n\n续接段落保留边界\n\n'),
         { text: '\n\n续接段落保留边界\n\n', complete: false },
     );
+    assert.deepEqual(
+        parseRevisionTextSegment(`<think>内部推理</think>\n正文\n${REVISION_END_MARKER}`),
+        { text: '正文', complete: true },
+    );
+    assert.deepEqual(
+        parseRevisionTextSegment('<thinking>尚未结束的推理'),
+        { text: '', complete: false },
+    );
+    assert.deepEqual(
+        parseRevisionTextSegment(`<final>最终正文\n${REVISION_END_MARKER}</final>`),
+        { text: '最终正文', complete: true },
+    );
 });
 
 test('builds a continuation request and removes duplicated overlap', () => {
