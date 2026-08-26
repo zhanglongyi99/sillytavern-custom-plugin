@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const runtime = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+const styles = await readFile(new URL('../style.css', import.meta.url), 'utf8');
 
 test('offers one selection action and two user-facing scope choices', () => {
     assert.match(runtime, /<span>修改<\/span>/);
@@ -49,4 +50,18 @@ test('keeps final save authority with the user after audit warnings', () => {
     assert.match(runtime, /审计仅提供风险提示，最终决定权属于你/);
     assert.doesNotMatch(runtime, /候选存在阻断项，不能保存|候选存在阻断项，不能替换/);
     assert.doesNotMatch(runtime, /apply\.disabled = !candidate\.value\.trim\(\) \|\|/);
+});
+
+test('supports block-level acceptance and a long-text review workspace', () => {
+    assert.match(runtime, />逐块确认</);
+    assert.match(runtime, /仅采用计划内/);
+    assert.match(runtime, /全部采用/);
+    assert.match(runtime, /全部保留原文/);
+    assert.match(runtime, /change\.classification !== 'protected'/);
+    assert.match(runtime, /composeRevisionFromDecisions/);
+    assert.match(runtime, /story-rewriter-resize-handle/);
+    assert.match(runtime, /switchWorkspaceView\(panel, 'changes'\)/);
+    assert.match(styles, /width: min\(760px, 96vw\)/);
+    assert.match(styles, /\.story-rewriter-panel:not\(\.is-selection-scope\) \.story-rewriter-candidate\s*\{[\s\S]*?min-height: 48vh/);
+    assert.match(styles, /\.story-rewriter-diff-pair\s*\{[\s\S]*?grid-template-columns/);
 });

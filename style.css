@@ -132,12 +132,35 @@
     display: flex;
     flex-direction: column;
     box-sizing: border-box;
-    width: min(640px, 100vw);
+    width: min(760px, 96vw);
+    min-width: min(420px, 96vw);
+    max-width: 96vw;
+    overflow: hidden;
     color: var(--SmartThemeBodyColor, #eee);
     background: var(--SmartThemeBlurTintColor, #20242b);
     border-left: 1px solid var(--SmartThemeBorderColor, #666);
     box-shadow: -14px 0 42px rgb(0 0 0 / 45%);
     animation: story-rewriter-slide-in 150ms ease-out;
+}
+
+.story-rewriter-resize-handle {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -5px;
+    z-index: 4;
+    width: 10px;
+    cursor: ew-resize;
+    touch-action: none;
+}
+
+.story-rewriter-resize-handle:hover,
+.story-rewriter-panel.is-resizing .story-rewriter-resize-handle {
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor, #8bd5ff) 45%, transparent);
+}
+
+.story-rewriter-panel.is-resizing {
+    user-select: none;
 }
 
 .story-rewriter-panel-header {
@@ -337,6 +360,37 @@
     gap: 8px;
 }
 
+.story-rewriter-review-toolbar {
+    position: sticky;
+    top: -1px;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 9px 10px;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #20242b) 96%, black);
+    border: 1px solid var(--SmartThemeBorderColor, #666);
+    border-radius: 7px;
+}
+
+.story-rewriter-review-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+.story-rewriter-review-actions .menu_button {
+    padding: 5px 8px;
+}
+
+.story-rewriter-review-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
 .story-rewriter-diff-card {
     padding: 8px 10px;
     background: rgb(255 255 255 / 4%);
@@ -348,6 +402,39 @@
 .story-rewriter-diff-card.is-linked { border-color: #dfb94f; }
 .story-rewriter-diff-card.is-transition { border-color: #5aa8df; }
 .story-rewriter-diff-card.is-protected { border-color: #d66b6b; }
+
+.story-rewriter-diff-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.story-rewriter-change-decision {
+    display: inline-flex !important;
+    align-items: center;
+    gap: 6px;
+    margin: 0 !important;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.story-rewriter-diff-pair {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 8px;
+    margin-top: 7px;
+}
+
+.story-rewriter-diff-pair > div {
+    min-width: 0;
+}
+
+.story-rewriter-diff-caption {
+    display: block;
+    opacity: 0.72;
+    font-size: 0.9em;
+}
 
 .story-rewriter-diff-card pre {
     max-height: 15em;
@@ -370,37 +457,13 @@
     margin: 7px 0;
 }
 
-.story-rewriter-compare {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 10px;
-    margin-top: 8px;
+.story-rewriter-candidate {
+    min-height: 12em;
+    line-height: 1.55;
 }
 
-.story-rewriter-compare > div {
-    min-width: 0;
-}
-
-.story-rewriter-compare span,
-.story-rewriter-compare label {
-    display: block;
-    margin: 0 0 5px;
-    font-weight: 600;
-}
-
-.story-rewriter-compare pre {
-    box-sizing: border-box;
-    min-height: 11em;
-    max-height: 36vh;
-    margin: 0;
-    overflow: auto;
-    padding: 9px;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    background: rgb(0 0 0 / 16%);
-    border: 1px solid var(--SmartThemeBorderColor, #666);
-    border-radius: 6px;
-    font: inherit;
+.story-rewriter-panel:not(.is-selection-scope) .story-rewriter-candidate {
+    min-height: 48vh;
 }
 
 .story-rewriter-panel-footer {
@@ -483,8 +546,12 @@
 }
 
 @media (max-width: 700px) {
-    .story-rewriter-panel { left: 0; width: 100%; }
-    .story-rewriter-compare { grid-template-columns: 1fr; }
+    .story-rewriter-panel { left: 0; width: 100%; min-width: 0; max-width: 100%; }
+    .story-rewriter-resize-handle { display: none; }
+    .story-rewriter-review-toolbar { position: static; align-items: flex-start; flex-direction: column; }
+    .story-rewriter-review-actions { justify-content: flex-start; }
+    .story-rewriter-diff-pair { grid-template-columns: 1fr; }
+    .story-rewriter-panel:not(.is-selection-scope) .story-rewriter-candidate { min-height: 55vh; }
     .story-rewriter-action span { display: none; }
     .story-rewriter-action button { min-width: 36px; justify-content: center; }
 }

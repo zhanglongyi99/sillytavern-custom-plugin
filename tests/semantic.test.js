@@ -4,7 +4,9 @@ import {
     auditRevision,
     buildImpactPrompt,
     buildRevisionPrompt,
+    buildChangedBlocks,
     compactSelectedText,
+    composeRevisionFromDecisions,
     createChatChunks,
     estimateTokenCount,
     getFocusParagraphIds,
@@ -136,6 +138,7 @@ test('builds source-grounded two-stage prompts without character offsets', () =>
     });
     assert.match(revisionPrompt, /"originalMessage": "贞德旧计划/);
     assert.match(revisionPrompt, /完整的新消息/);
+    assert.match(revisionPrompt, /用户逐块筛选后的当前合成稿/);
 });
 
 test('parses a fenced structured full revision and rejects internal markers', () => {
@@ -165,6 +168,33 @@ test('audits changes outside the planned region', () => {
     assert.equal(audit.counts.focus, 1);
     assert.equal(audit.counts.protected, 3);
     assert.equal(audit.hardBlocked, true);
+});
+
+test('composes a revision from independently accepted change blocks', () => {
+    const original = '第一段不变。\n\n第二段旧文。\n\n第三段不变。';
+    const revised = '第一段不变。\n\n第二段新文。\n\n新增段落。\n\n第三段不变。';
+    const changes = buildChangedBlocks(segmentMessage(original), segmentMessage(revised));
+    assert.deepEqual(changes.map(change => [change.id, change.kind]), [
+        ['C001', 'modified'],
+        ['C002', 'inserted'],
+    ]);
+    assert.equal(
+        composeRevisionFromDecisions(original, revised, new Set(['C001'])),
+        '第一段不变。\n\n第二段新文。\n\n第三段不变。',
+    );
+    assert.equal(
+        composeRevisionFromDecisions(original, revised, new Set(['C002'])),
+        '第一段不变。\n\n第二段旧文。\n\n新增段落。\n\n第三段不变。',
+    );
+});
+
+test('can accept or reject a proposed paragraph deletion', () => {
+    const original = '保留开头。\n\n可能删除。\n\n保留结尾。';
+    const revised = '保留开头。\n\n保留结尾。';
+    const changes = buildChangedBlocks(segmentMessage(original), segmentMessage(revised));
+    assert.deepEqual(changes.map(change => change.kind), ['deleted']);
+    assert.equal(composeRevisionFromDecisions(original, revised, ['C001']), revised);
+    assert.equal(composeRevisionFromDecisions(original, revised, []), original);
 });
 
 test('allows complete revision when the whole message is the focus', () => {

@@ -12,6 +12,7 @@ import {
     buildImpactPrompt,
     buildRevisionPrompt,
     compactSelectedText,
+    composeRevisionFromDecisions,
     createCharacterChunks,
     createChatChunks,
     createWorldInfoChunks,
@@ -63,6 +64,7 @@ const state = {
     observerQueued: false,
     selectionCaptureTimer: null,
     selectionPointerDown: false,
+    panelResizeCleanup: null,
     sessionHistory: new WeakMap(),
 };
 
@@ -377,10 +379,41 @@ function onWindowBlur() {
 }
 
 function closeWorkspace() {
+    state.panelResizeCleanup?.();
+    state.panelResizeCleanup = null;
     state.panel?.remove();
     state.panel = null;
     state.session = null;
     hideActionButton();
+}
+
+function enablePanelResize(panel) {
+    const handle = panel.querySelector('.story-rewriter-resize-handle');
+    if (!handle) return;
+    handle.addEventListener('pointerdown', event => {
+        if (window.matchMedia('(max-width: 700px)').matches) return;
+        event.preventDefault();
+        state.panelResizeCleanup?.();
+        const startX = event.clientX;
+        const startWidth = panel.getBoundingClientRect().width;
+        const onMove = moveEvent => {
+            const maximum = window.innerWidth * 0.96;
+            const width = Math.min(maximum, Math.max(420, startWidth + startX - moveEvent.clientX));
+            panel.style.width = `${width}px`;
+        };
+        const cleanup = () => {
+            window.removeEventListener('pointermove', onMove);
+            window.removeEventListener('pointerup', cleanup);
+            window.removeEventListener('pointercancel', cleanup);
+            panel.classList.remove('is-resizing');
+            if (state.panelResizeCleanup === cleanup) state.panelResizeCleanup = null;
+        };
+        state.panelResizeCleanup = cleanup;
+        panel.classList.add('is-resizing');
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', cleanup, { once: true });
+        window.addEventListener('pointercancel', cleanup, { once: true });
+    });
 }
 
 function setWorkspaceBusy(panel, busy, status = '') {
@@ -422,13 +455,19 @@ function renderSessionTurns(panel) {
         restore.className = 'menu_button story-rewriter-restore-candidate';
         restore.textContent = '恢复这个候选';
         restore.addEventListener('click', () => {
-            state.session.candidate = turn.candidate;
-            panel.querySelector('.story-rewriter-candidate').value = turn.candidate;
             panel.querySelector('.story-rewriter-preview').hidden = false;
             if (state.session.scopeMode === 'selection') {
+                state.session.candidate = turn.candidate;
+                panel.querySelector('.story-rewriter-candidate').value = turn.candidate;
                 panel.querySelector('.story-rewriter-apply').disabled = false;
             } else {
-                auditCurrentCandidate(panel);
+                if (turn.impactPlan) {
+                    state.session.impactPlan = cloneValue(turn.impactPlan);
+                    state.session.reviewPlan = cloneValue(turn.impactPlan);
+                    renderImpactPlan(panel);
+                }
+                initializeCandidateReview(panel, turn.candidate);
+                switchWorkspaceView(panel, 'changes');
             }
             panel.querySelector('.story-rewriter-status').textContent = `已恢复第 ${index + 1} 轮候选并重新审计。`;
         });
@@ -477,9 +516,13 @@ function resetSessionForScopeChange(panel) {
     session.turns = [];
     session.repository = null;
     session.impactPlan = null;
+    session.reviewPlan = null;
     session.audit = null;
     session.pendingTask = null;
     session.pendingInstruction = '';
+    session.proposalCandidate = '';
+    session.reviewAudit = null;
+    session.acceptedChangeIds = new Set();
     panel.querySelector('.story-rewriter-candidate').value = '';
     panel.querySelector('.story-rewriter-preview').hidden = true;
     panel.querySelector('.story-rewriter-impact').hidden = true;
@@ -491,6 +534,7 @@ function resetSessionForScopeChange(panel) {
 
 function updateScopeInterface(panel) {
     const selectionOnly = state.session?.scopeMode === 'selection';
+    panel.classList.toggle('is-selection-scope', selectionOnly);
     panel.querySelector('.story-rewriter-view-tabs').hidden = selectionOnly;
     panel.querySelector('.story-rewriter-advanced-actions').hidden = selectionOnly;
     panel.querySelectorAll('.story-rewriter-view').forEach(section => {
@@ -734,6 +778,10 @@ function getEffectiveImpactPlan(plan) {
     };
 }
 
+function getSessionReviewPlan(session) {
+    return getEffectiveImpactPlan(session.reviewPlan ?? session.impactPlan);
+}
+
 function renderImpactPlan(panel) {
     const host = panel.querySelector('.story-rewriter-impact-content');
     host.replaceChildren();
@@ -836,51 +884,180 @@ function renderReferences(panel) {
     host.append(list);
 }
 
-function renderAudit(panel) {
+function updateAuditPresentation(panel) {
     const session = state.session;
-    const audit = session.audit;
+    const audit = session?.audit;
     const summary = panel.querySelector('.story-rewriter-audit-summary');
-    const host = panel.querySelector('.story-rewriter-diff-content');
-    host.replaceChildren();
+    const messagesHost = panel.querySelector('.story-rewriter-audit-messages');
     if (!audit) {
         summary.textContent = '';
+        messagesHost?.replaceChildren();
         return;
     }
     const decisionNotice = audit.hardBlocked || audit.requiresOverride ? ' · 审计仅作提示，最终由你决定' : '';
-    summary.textContent = `强修改 ${audit.counts.focus} 处 · 关联修改 ${audit.counts.linked} 处 · 衔接调整 ${audit.counts.transition} 处 · 疑似越界 ${audit.counts.protected} 处${decisionNotice}`;
+    summary.textContent = `合成稿：强修改 ${audit.counts.focus} 处 · 关联修改 ${audit.counts.linked} 处 · 衔接调整 ${audit.counts.transition} 处 · 疑似越界 ${audit.counts.protected} 处${decisionNotice}`;
     summary.className = `story-rewriter-audit-summary${audit.hardBlocked ? ' is-blocked' : audit.requiresOverride ? ' is-warning' : ''}`;
-
+    if (!messagesHost) return;
+    messagesHost.replaceChildren();
     for (const message of [...audit.conflicts, ...audit.warnings]) {
         const warning = document.createElement('p');
         warning.className = audit.conflicts.includes(message) ? 'story-rewriter-conflict' : 'story-rewriter-warning';
         warning.textContent = message;
-        host.append(warning);
-    }
-    for (const change of audit.changes) {
-        const card = document.createElement('article');
-        card.className = `story-rewriter-diff-card is-${change.classification}`;
-        const heading = document.createElement('strong');
-        const names = { focus: '强修改', linked: '关联修改', transition: '衔接调整', protected: '疑似越界' };
-        heading.textContent = `${names[change.classification]} · ${change.originalId ?? change.anchorId ?? '新增段落'}`;
-        const before = document.createElement('pre');
-        before.textContent = change.originalText || '（新增）';
-        const after = document.createElement('pre');
-        after.textContent = change.candidateText || '（删除）';
-        card.append(heading, before, after);
-        host.append(card);
+        messagesHost.append(warning);
     }
 }
 
-function auditCurrentCandidate(panel) {
+function updateReviewSelectionPresentation(panel) {
+    const session = state.session;
+    const changes = session?.reviewAudit?.changes ?? [];
+    const accepted = session?.acceptedChangeIds ?? new Set();
+    const count = panel.querySelector('.story-rewriter-review-count');
+    if (count) count.textContent = `已采用 ${accepted.size}/${changes.length} 项修改`;
+    panel.querySelectorAll('[data-review-change-id]').forEach(input => {
+        input.checked = accepted.has(input.dataset.reviewChangeId);
+    });
+}
+
+function composeReviewCandidate(panel) {
+    const session = state.session;
+    if (!session?.proposalCandidate || !session.reviewAudit) return;
+    const candidate = composeRevisionFromDecisions(
+        session.capture.messageText,
+        session.proposalCandidate,
+        session.acceptedChangeIds,
+    );
+    session.candidate = candidate;
+    panel.querySelector('.story-rewriter-candidate').value = candidate;
+    session.audit = auditRevision(session.capture.messageText, candidate, getSessionReviewPlan(session));
+    updateAuditPresentation(panel);
+    updateReviewSelectionPresentation(panel);
+    panel.querySelector('.story-rewriter-apply').disabled = !candidate.trim();
+    panel.querySelector('.story-rewriter-replace').disabled = !candidate.trim();
+}
+
+function setReviewAcceptance(panel, predicate) {
+    const session = state.session;
+    if (!session?.reviewAudit) return;
+    session.acceptedChangeIds = new Set(
+        session.reviewAudit.changes.filter(predicate).map(change => change.id),
+    );
+    composeReviewCandidate(panel);
+}
+
+function renderAudit(panel) {
+    const session = state.session;
+    const review = session?.reviewAudit;
+    const host = panel.querySelector('.story-rewriter-diff-content');
+    host.replaceChildren();
+    if (!review) {
+        updateAuditPresentation(panel);
+        return;
+    }
+
+    const toolbar = document.createElement('div');
+    toolbar.className = 'story-rewriter-review-toolbar';
+    const count = document.createElement('strong');
+    count.className = 'story-rewriter-review-count';
+    const actions = document.createElement('div');
+    actions.className = 'story-rewriter-review-actions';
+    const addAction = (label, predicate) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'menu_button';
+        button.textContent = label;
+        button.addEventListener('click', () => setReviewAcceptance(panel, predicate));
+        actions.append(button);
+    };
+    addAction('仅采用计划内', change => change.classification !== 'protected');
+    addAction('全部采用', () => true);
+    addAction('全部保留原文', () => false);
+    toolbar.append(count, actions);
+
+    const messages = document.createElement('div');
+    messages.className = 'story-rewriter-audit-messages';
+    const list = document.createElement('div');
+    list.className = 'story-rewriter-review-list';
+    const names = { focus: '强修改', linked: '关联修改', transition: '衔接调整', protected: '疑似越界' };
+    for (const change of review.changes) {
+        const card = document.createElement('article');
+        card.className = `story-rewriter-diff-card is-${change.classification}`;
+        const heading = document.createElement('div');
+        heading.className = 'story-rewriter-diff-heading';
+        const title = document.createElement('strong');
+        title.textContent = `${names[change.classification]} · ${change.originalId ?? change.anchorId ?? '新增段落'}`;
+        const decision = document.createElement('label');
+        decision.className = 'story-rewriter-change-decision';
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.dataset.reviewChangeId = change.id;
+        input.checked = session.acceptedChangeIds.has(change.id);
+        input.addEventListener('change', () => {
+            if (input.checked) session.acceptedChangeIds.add(change.id);
+            else session.acceptedChangeIds.delete(change.id);
+            composeReviewCandidate(panel);
+        });
+        const decisionText = document.createElement('span');
+        decisionText.textContent = '采用此修改';
+        decision.append(input, decisionText);
+        heading.append(title, decision);
+
+        const pair = document.createElement('div');
+        pair.className = 'story-rewriter-diff-pair';
+        const makeVersion = (label, text, emptyLabel) => {
+            const section = document.createElement('div');
+            const caption = document.createElement('span');
+            caption.className = 'story-rewriter-diff-caption';
+            caption.textContent = label;
+            const content = document.createElement('pre');
+            content.textContent = text || emptyLabel;
+            section.append(caption, content);
+            return section;
+        };
+        pair.append(
+            makeVersion('原文', change.originalText, '（新增）'),
+            makeVersion('候选', change.candidateText, '（删除）'),
+        );
+        card.append(heading, pair);
+        list.append(card);
+    }
+    host.append(toolbar, messages, list);
+    updateAuditPresentation(panel);
+    updateReviewSelectionPresentation(panel);
+}
+
+function initializeCandidateReview(panel, candidate, { acceptAll = false, preserveCandidate = false } = {}) {
+    const session = state.session;
+    const effectivePlan = getSessionReviewPlan(session);
+    session.proposalCandidate = candidate;
+    session.reviewAudit = auditRevision(session.capture.messageText, candidate, effectivePlan);
+    session.acceptedChangeIds = new Set(session.reviewAudit.changes
+        .filter(change => acceptAll || change.classification !== 'protected')
+        .map(change => change.id));
+    if (preserveCandidate) {
+        session.candidate = candidate;
+        session.audit = auditRevision(session.capture.messageText, candidate, effectivePlan);
+        renderAudit(panel);
+    } else {
+        composeReviewCandidate(panel);
+        renderAudit(panel);
+    }
+    panel.querySelector('.story-rewriter-apply').disabled = !session.candidate.trim();
+    panel.querySelector('.story-rewriter-replace').disabled = !session.candidate.trim();
+}
+
+function auditCurrentCandidate(panel, { rebuildReview = false } = {}) {
     const session = state.session;
     if (!session || session.scopeMode === 'selection' || !session.impactPlan) return;
     const candidate = panel.querySelector('.story-rewriter-candidate').value.trim();
     if (!candidate) {
         session.audit = null;
-        renderAudit(panel);
+        updateAuditPresentation(panel);
+        panel.querySelector('.story-rewriter-apply').disabled = true;
+        panel.querySelector('.story-rewriter-replace').disabled = true;
         return;
     }
-    session.audit = auditRevision(session.capture.messageText, candidate, getEffectiveImpactPlan(session.impactPlan));
+    if (rebuildReview) return initializeCandidateReview(panel, candidate, { acceptAll: true, preserveCandidate: true });
+    session.audit = auditRevision(session.capture.messageText, candidate, getSessionReviewPlan(session));
     renderAudit(panel);
     panel.querySelector('.story-rewriter-apply').disabled = false;
     panel.querySelector('.story-rewriter-replace').disabled = false;
@@ -888,12 +1065,15 @@ function auditCurrentCandidate(panel) {
 
 function showCandidate(panel, candidate, instruction) {
     const session = state.session;
-    session.candidate = candidate;
     session.requirements.push(instruction);
     if (session.requirements.length > MAX_SESSION_TURNS) session.requirements.shift();
-    session.turns.push({ instruction, candidate, createdAt: new Date().toISOString() });
+    session.turns.push({
+        instruction,
+        candidate,
+        impactPlan: cloneValue(session.impactPlan),
+        createdAt: new Date().toISOString(),
+    });
     if (session.turns.length > MAX_SESSION_TURNS) session.turns.shift();
-    panel.querySelector('.story-rewriter-candidate').value = candidate;
     panel.querySelector('.story-rewriter-preview').hidden = false;
     panel.querySelector('.story-rewriter-generate').hidden = false;
     panel.querySelector('.story-rewriter-apply').disabled = false;
@@ -901,10 +1081,14 @@ function showCandidate(panel, candidate, instruction) {
     panel.querySelector('.story-rewriter-instruction').value = '';
     renderSessionTurns(panel);
     renderReferences(panel);
-    auditCurrentCandidate(panel);
+    session.reviewPlan = cloneValue(session.impactPlan);
+    initializeCandidateReview(panel, candidate);
+    switchWorkspaceView(panel, 'changes');
+    const autoRejected = session.reviewAudit.changes.filter(change => change.classification === 'protected').length;
+    const filteredNotice = autoRejected ? `已默认保留原文中的 ${autoRejected} 项疑似越界变化。` : '';
     panel.querySelector('.story-rewriter-status').textContent = session.audit?.hardBlocked
-        ? '候选已生成，审计发现高风险项。建议先查看修改；你仍可确认后应用。'
-        : '新版本已生成。可以继续提出要求、查看修改，或应用为新版本。';
+        ? `候选已生成。${filteredNotice}合成稿仍有高风险项，请逐块确认；你仍可确认后应用。`
+        : `候选已生成。${filteredNotice}可以逐块确认、继续提出要求，或应用为新版本。`;
 }
 
 async function generateCompleteRevision(panel, instruction) {
@@ -1109,6 +1293,7 @@ async function persistMessageText(message, nextText, previousText) {
 }
 
 function createRevisionMetadata(session, audit) {
+    const plan = session.reviewPlan ?? session.impactPlan;
     return {
         version: 1,
         mode: session.editMode,
@@ -1118,9 +1303,9 @@ function createRevisionMetadata(session, audit) {
         requirements: session.requirements.slice(-MAX_SESSION_TURNS),
         influence: session.influence,
         impact: {
-            focus: session.impactPlan?.focusRegions?.map(region => region.paragraphId) ?? [],
-            linked: session.impactPlan?.linkedRegions?.filter(region => region.enabled !== false).map(region => region.paragraphId) ?? [],
-            transition: session.impactPlan?.transitionRegions?.filter(region => region.enabled !== false).map(region => region.paragraphId) ?? [],
+            focus: plan?.focusRegions?.map(region => region.paragraphId) ?? [],
+            linked: plan?.linkedRegions?.filter(region => region.enabled !== false).map(region => region.paragraphId) ?? [],
+            transition: plan?.transitionRegions?.filter(region => region.enabled !== false).map(region => region.paragraphId) ?? [],
         },
         audit: audit ? {
             counts: audit.counts,
@@ -1177,7 +1362,7 @@ function confirmAuditRisks(session, actionLabel) {
     if (!audit?.hardBlocked && !audit?.requiresOverride) return true;
     const messages = [...(audit.conflicts ?? []), ...(audit.warnings ?? [])];
     const visibleMessages = messages.slice(0, 6).map(message => `• ${String(message).slice(0, 180)}`);
-    if (messages.length > visibleMessages.length) visibleMessages.push(`• 另有 ${messages.length - visibleMessages.length} 项，请在“查看修改”中检查。`);
+    if (messages.length > visibleMessages.length) visibleMessages.push(`• 另有 ${messages.length - visibleMessages.length} 项，请在“逐块确认”中检查。`);
     const severity = audit.hardBlocked ? '审计发现高风险项' : '审计发现需要确认的提醒';
     return globalThis.confirm?.([
         `${severity}：`,
@@ -1308,9 +1493,13 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
         constraints: '',
         requirements: [],
         candidate: '',
+        proposalCandidate: '',
+        reviewAudit: null,
+        acceptedChangeIds: new Set(),
         turns: [],
         repository: null,
         impactPlan: null,
+        reviewPlan: null,
         audit: null,
         pendingTask: null,
         pendingInstruction: '',
@@ -1325,6 +1514,7 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
     panel.setAttribute('role', 'dialog');
     panel.setAttribute('aria-labelledby', 'story-rewriter-title');
     panel.innerHTML = `
+        <div class="story-rewriter-resize-handle" title="拖动调整工作台宽度" aria-hidden="true"></div>
         <header class="story-rewriter-panel-header">
             <div><h3 id="story-rewriter-title">${titles[editMode]}</h3><small>消息 #${capture.messageId} · ${hasSelection ? '从选区开始' : '自动识别修改重点'}</small></div>
             <button type="button" class="story-rewriter-close" aria-label="关闭">×</button>
@@ -1339,7 +1529,7 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
                 <small class="story-rewriter-timeline-notice">目标是历史消息；会参考它之后的现有剧情，以减少前后冲突。</small>
             </section>
 
-            <details open>
+            <details class="story-rewriter-source-details">
                 <summary>${hasSelection ? '当前选区' : '当前完整消息'}</summary>
                 <textarea class="text_pole story-rewriter-original" rows="6" readonly></textarea>
             </details>
@@ -1354,23 +1544,21 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
             <section class="story-rewriter-preview" hidden>
                 <h4>新版本</h4>
                 <div class="story-rewriter-view-tabs" ${semantic ? '' : 'hidden'}>
-                    <button type="button" class="story-rewriter-view-tab" data-view="changes">查看修改</button>
+                    <button type="button" class="story-rewriter-view-tab" data-view="changes">逐块确认</button>
                     <button type="button" class="story-rewriter-view-tab is-active" data-view="full">新版本</button>
                     <button type="button" class="story-rewriter-view-tab" data-view="sources">使用的资料</button>
                 </div>
                 <div class="story-rewriter-audit-summary"></div>
                 <section class="story-rewriter-view story-rewriter-diff" data-view="changes" hidden>
-                    <details class="story-rewriter-impact" hidden open>
+                    <details class="story-rewriter-impact" hidden>
                         <summary>Agent 识别的影响范围</summary>
                         <div class="story-rewriter-impact-content"></div>
                     </details>
                     <div class="story-rewriter-diff-content"></div>
                 </section>
                 <section class="story-rewriter-view" data-view="full">
-                    <div class="story-rewriter-compare">
-                        <div><span>原文</span><pre class="story-rewriter-compare-original"></pre></div>
-                        <div><label for="story-rewriter-candidate">候选（可编辑）</label><textarea id="story-rewriter-candidate" class="text_pole story-rewriter-candidate" rows="14"></textarea></div>
-                    </div>
+                    <label for="story-rewriter-candidate">合成后的完整版本（可编辑）</label>
+                    <textarea id="story-rewriter-candidate" class="text_pole story-rewriter-candidate" rows="24"></textarea>
                 </section>
                 <section class="story-rewriter-view story-rewriter-sources" data-view="sources" hidden></section>
             </section>
@@ -1392,16 +1580,11 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
         </footer>`;
 
     panel.querySelector('.story-rewriter-original').value = hasSelection ? capture.range.rawText : capture.messageText;
-    panel.querySelector('.story-rewriter-compare-original').textContent = capture.messageText;
     panel.querySelectorAll('input[name="story-rewriter-scope"]').forEach(input => {
         input.addEventListener('change', event => {
             if (!event.currentTarget.checked) return;
             state.session.scopeMode = SCOPE_MODES.has(event.currentTarget.value) ? event.currentTarget.value : 'smart';
             resetSessionForScopeChange(panel);
-            const original = panel.querySelector('.story-rewriter-compare-original');
-            if (original) original.textContent = state.session.scopeMode === 'selection'
-                ? state.session.capture.range.rawText
-                : state.session.capture.messageText;
             panel.querySelector('.story-rewriter-status').textContent = state.session.scopeMode === 'selection'
                 ? '只会生成选区的替换文字，圈外内容保持不变。'
                 : '会识别相关段落并生成完整新版本。';
@@ -1423,7 +1606,7 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
         if (state.session.scopeMode === 'selection') {
             panel.querySelector('.story-rewriter-apply').disabled = !event.currentTarget.value.trim();
         } else {
-            auditCurrentCandidate(panel);
+            auditCurrentCandidate(panel, { rebuildReview: true });
         }
     });
     panel.querySelector('.story-rewriter-instruction').addEventListener('keydown', event => {
@@ -1437,6 +1620,7 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
     });
     document.body.append(panel);
     state.panel = panel;
+    enablePanelResize(panel);
     updateContextSummary(panel);
     void syncContextSummary(panel);
     updateScopeInterface(panel);
