@@ -2,11 +2,32 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+    chooseVisibleSelectionRect,
     findSelectionRange,
     normalizeComparable,
     projectMarkdown,
     replaceRange,
 } from '../lib/selection.js';
+
+test('positions selection actions from the last visible line of a long selection', () => {
+    const rects = [
+        { top: -40, right: 200, bottom: -20, left: 20, width: 180, height: 20 },
+        { top: 120, right: 300, bottom: 140, left: 20, width: 280, height: 20 },
+        { top: 680, right: 260, bottom: 700, left: 20, width: 240, height: 20 },
+        { top: 900, right: 280, bottom: 920, left: 20, width: 260, height: 20 },
+    ];
+
+    assert.equal(chooseVisibleSelectionRect(rects, 800, 720), rects[2]);
+});
+
+test('does not show selection actions when every selected line is outside the viewport', () => {
+    const rects = [
+        { top: -80, right: 200, bottom: -60, left: 20, width: 180, height: 20 },
+        { top: 900, right: 260, bottom: 920, left: 20, width: 240, height: 20 },
+    ];
+
+    assert.equal(chooseVisibleSelectionRect(rects, 800, 720), null);
+});
 
 test('maps a plain Chinese selection to its raw range', () => {
     const raw = '她停了一下，然后说：“别走。”';

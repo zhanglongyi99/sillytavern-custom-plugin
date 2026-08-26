@@ -1,4 +1,4 @@
-import { findSelectionRange, replaceRange } from './lib/selection.js';
+import { chooseVisibleSelectionRect, findSelectionRange, replaceRange } from './lib/selection.js';
 import {
     DEFAULT_SYSTEM_PROMPT,
     buildFullContextRewritePrompt,
@@ -58,6 +58,8 @@ const state = {
     snackbar: null,
     observer: null,
     observerQueued: false,
+    selectionCaptureTimer: null,
+    selectionPointerDown: false,
     sessionHistory: new WeakMap(),
 };
 
@@ -227,7 +229,7 @@ function closestMessageText(node) {
 }
 
 function captureSelection() {
-    if (!state.active || !state.settings.enabled) return hideActionButton();
+    if (!state.active || !state.settings.enabled || state.panel || state.selectionPointerDown) return hideActionButton();
     refreshContext();
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed || selection.rangeCount !== 1) return hideActionButton();
@@ -252,9 +254,11 @@ function captureSelection() {
     const rawRange = findSelectionRange(message.mes, selectedText, visibleStart);
     if (!rawRange) return hideActionButton();
 
-    const rect = range.getBoundingClientRect().width || range.getBoundingClientRect().height
-        ? range.getBoundingClientRect()
-        : range.getClientRects()[0];
+    const clientRects = Array.from(range.getClientRects());
+    const rect = chooseVisibleSelectionRect(clientRects, window.innerWidth, window.innerHeight)
+        ?? (clientRects.length === 0
+            ? chooseVisibleSelectionRect([range.getBoundingClientRect()], window.innerWidth, window.innerHeight)
+            : null);
     if (!rect) return hideActionButton();
     state.capture = {
         message,
@@ -266,9 +270,44 @@ function captureSelection() {
     showActionButton(rect);
 }
 
-function onSelectionGesture(event) {
+function scheduleSelectionCapture(delay = 0) {
+    window.clearTimeout(state.selectionCaptureTimer);
+    state.selectionCaptureTimer = window.setTimeout(() => {
+        state.selectionCaptureTimer = null;
+        captureSelection();
+    }, delay);
+}
+
+function onSelectionPointerDown(event) {
     if (event.target?.closest?.('.story-rewriter-ui')) return;
-    window.setTimeout(captureSelection, 0);
+    state.selectionPointerDown = true;
+    hideActionButton();
+}
+
+function onSelectionPointerUp(event) {
+    state.selectionPointerDown = false;
+    if (event.target?.closest?.('.story-rewriter-ui')) return;
+    scheduleSelectionCapture(0);
+}
+
+function onSelectionKeyUp(event) {
+    if (event.target?.closest?.('.story-rewriter-ui')) return;
+    scheduleSelectionCapture(0);
+}
+
+function onSelectionChange() {
+    if (!state.active || state.selectionPointerDown) return;
+    scheduleSelectionCapture(40);
+}
+
+function onViewportScroll() {
+    hideActionButton();
+    scheduleSelectionCapture(120);
+}
+
+function onViewportResize() {
+    hideActionButton();
+    scheduleSelectionCapture(120);
 }
 
 function closeWorkspace() {
@@ -1481,12 +1520,15 @@ export async function activate() {
     loadSettings();
     await mountSettings();
     createActionButton();
-    document.addEventListener('mouseup', onSelectionGesture);
-    document.addEventListener('keyup', onSelectionGesture);
+    document.addEventListener('pointerdown', onSelectionPointerDown, true);
+    window.addEventListener('pointerup', onSelectionPointerUp, true);
+    window.addEventListener('pointercancel', onSelectionPointerUp, true);
+    document.addEventListener('selectionchange', onSelectionChange);
+    document.addEventListener('keyup', onSelectionKeyUp);
     document.addEventListener('click', onDocumentClick);
     document.addEventListener('keydown', onKeyDown);
-    window.addEventListener('resize', hideActionButton);
-    document.addEventListener('scroll', hideActionButton, true);
+    window.addEventListener('resize', onViewportResize);
+    document.addEventListener('scroll', onViewportScroll, true);
     state.observer = new MutationObserver(queueUndoButtonRefresh);
     state.observer.observe(document.querySelector('#chat') ?? document.body, { childList: true, subtree: true });
     ensureMessageButtons();
@@ -1496,12 +1538,18 @@ export async function activate() {
 export function deactivate() {
     if (!state.active) return;
     state.active = false;
-    document.removeEventListener('mouseup', onSelectionGesture);
-    document.removeEventListener('keyup', onSelectionGesture);
+    document.removeEventListener('pointerdown', onSelectionPointerDown, true);
+    window.removeEventListener('pointerup', onSelectionPointerUp, true);
+    window.removeEventListener('pointercancel', onSelectionPointerUp, true);
+    document.removeEventListener('selectionchange', onSelectionChange);
+    document.removeEventListener('keyup', onSelectionKeyUp);
     document.removeEventListener('click', onDocumentClick);
     document.removeEventListener('keydown', onKeyDown);
-    window.removeEventListener('resize', hideActionButton);
-    document.removeEventListener('scroll', hideActionButton, true);
+    window.removeEventListener('resize', onViewportResize);
+    document.removeEventListener('scroll', onViewportScroll, true);
+    window.clearTimeout(state.selectionCaptureTimer);
+    state.selectionCaptureTimer = null;
+    state.selectionPointerDown = false;
     state.observer?.disconnect();
     state.observer = null;
     state.actionButton?.remove();
