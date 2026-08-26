@@ -264,10 +264,11 @@ function captureSelection() {
     showActionButton(rect);
 }
 
-function scheduleSelectionCapture(delay = 0) {
+function scheduleSelectionCapture(delay = 0, releaseStuckPointer = false) {
     window.clearTimeout(state.selectionCaptureTimer);
     state.selectionCaptureTimer = window.setTimeout(() => {
         state.selectionCaptureTimer = null;
+        if (releaseStuckPointer) state.selectionPointerDown = false;
         captureSelection();
     }, delay);
 }
@@ -296,12 +297,20 @@ function onSelectionChange() {
 
 function onViewportScroll() {
     hideActionButton();
-    scheduleSelectionCapture(120);
+    // Auto-scroll selection can release outside the document, so pointerup may
+    // never reach us. Once scrolling settles, trust the live DOM selection and
+    // clear a stale pointer-down state before recapturing it.
+    scheduleSelectionCapture(180, true);
 }
 
 function onViewportResize() {
     hideActionButton();
     scheduleSelectionCapture(120);
+}
+
+function onWindowBlur() {
+    state.selectionPointerDown = false;
+    scheduleSelectionCapture(80);
 }
 
 function closeWorkspace() {
@@ -1479,6 +1488,11 @@ export async function activate() {
     document.addEventListener('pointerdown', onSelectionPointerDown, true);
     window.addEventListener('pointerup', onSelectionPointerUp, true);
     window.addEventListener('pointercancel', onSelectionPointerUp, true);
+    window.addEventListener('mouseup', onSelectionPointerUp, true);
+    window.addEventListener('touchend', onSelectionPointerUp, true);
+    window.addEventListener('touchcancel', onSelectionPointerUp, true);
+    document.addEventListener('contextmenu', onSelectionPointerUp, true);
+    window.addEventListener('blur', onWindowBlur);
     document.addEventListener('selectionchange', onSelectionChange);
     document.addEventListener('keyup', onSelectionKeyUp);
     document.addEventListener('click', onDocumentClick);
@@ -1497,6 +1511,11 @@ export function deactivate() {
     document.removeEventListener('pointerdown', onSelectionPointerDown, true);
     window.removeEventListener('pointerup', onSelectionPointerUp, true);
     window.removeEventListener('pointercancel', onSelectionPointerUp, true);
+    window.removeEventListener('mouseup', onSelectionPointerUp, true);
+    window.removeEventListener('touchend', onSelectionPointerUp, true);
+    window.removeEventListener('touchcancel', onSelectionPointerUp, true);
+    document.removeEventListener('contextmenu', onSelectionPointerUp, true);
+    window.removeEventListener('blur', onWindowBlur);
     document.removeEventListener('selectionchange', onSelectionChange);
     document.removeEventListener('keyup', onSelectionKeyUp);
     document.removeEventListener('click', onDocumentClick);

@@ -17,3 +17,10 @@ test('keeps technical context and influence selectors out of the workspace', () 
     assert.match(runtime, />应用为新版本</);
     assert.match(runtime, /修改这条回复/);
 });
+
+test('recovers a long auto-scrolled selection when pointer release is lost', () => {
+    assert.match(runtime, /scheduleSelectionCapture\(180, true\)/);
+    assert.match(runtime, /addEventListener\('mouseup', onSelectionPointerUp/);
+    assert.match(runtime, /addEventListener\('touchend', onSelectionPointerUp/);
+    assert.match(runtime, /addEventListener\('contextmenu', onSelectionPointerUp/);
+});
