@@ -27,7 +27,8 @@
                 <input id="story_rewriter_response_length" class="text_pole" type="number" min="64" max="4096" step="64">
 
                 <label for="story_rewriter_full_response_length">完整候选最大 Token 数</label>
-                <input id="story_rewriter_full_response_length" class="text_pole" type="number" min="512" max="16384" step="256">
+                <input id="story_rewriter_full_response_length" class="text_pole" type="number" min="512" max="65536" step="256">
+                <small class="story-rewriter-setting-hint">这是所有自动续接段合计的总预算；单段仍遵循当前酒馆预设的响应上限。</small>
 
                 <label for="story_rewriter_retrieval_chars">按需资料字符预算</label>
                 <input id="story_rewriter_retrieval_chars" class="text_pole" type="number" min="1000" max="50000" step="1000">

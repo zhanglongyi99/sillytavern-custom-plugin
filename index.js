@@ -10,6 +10,7 @@ import {
 import {
     auditRevision,
     buildImpactPrompt,
+    buildRevisionContinuationPrompt,
     buildRevisionPrompt,
     compactSelectedText,
     composeRevisionFromDecisions,
@@ -20,10 +21,10 @@ import {
     getFocusParagraphIds,
     IMPACT_JSON_SCHEMA,
     IMPACT_LEVELS,
+    mergeRevisionContinuation,
     parseImpactResponse,
-    parseRevisionResponse,
+    parseRevisionTextSegment,
     retrieveReferences,
-    REVISION_JSON_SCHEMA,
     segmentMessage,
     validateImpactPlan,
 } from './lib/semantic.js';
@@ -33,16 +34,17 @@ const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
+const MAX_REVISION_SEGMENTS = 8;
 const CONTEXT_MODES = new Set(['tavern', 'local']);
 const EDIT_MODES = new Set(['semantic', 'full']);
 const SCOPE_MODES = new Set(['selection', 'smart']);
 const DEFAULT_SETTINGS = Object.freeze({
-    settingsVersion: 5,
+    settingsVersion: 6,
     enabled: true,
     contextMode: 'tavern',
     contextCharacters: 2000,
     responseLength: 1024,
-    fullResponseLength: 8192,
+    fullResponseLength: 32768,
     persistentUndo: true,
     defaultInfluence: 'semantic',
     confirmImpact: false,
@@ -147,18 +149,22 @@ function loadSettings() {
     const storedVersion = Number(stored.settingsVersion ?? 0);
     const upgradingToV4 = storedVersion < 4;
     const upgradingToV5 = storedVersion < 5;
+    const upgradingToV6 = storedVersion < 6;
     const storedAnalysisLength = Number(stored.analysisResponseLength);
+    const storedFullResponseLength = Number(stored.fullResponseLength);
     state.settings = {
         ...DEFAULT_SETTINGS,
         ...stored,
-        settingsVersion: 5,
+        settingsVersion: 6,
         enabled: stored.enabled ?? DEFAULT_SETTINGS.enabled,
         contextMode: upgradingToV4
             ? DEFAULT_SETTINGS.contextMode
             : CONTEXT_MODES.has(stored.contextMode) ? stored.contextMode : DEFAULT_SETTINGS.contextMode,
         contextCharacters: clampNumber(stored.contextCharacters, 0, 8000, DEFAULT_SETTINGS.contextCharacters),
         responseLength: clampNumber(stored.responseLength, 64, 4096, DEFAULT_SETTINGS.responseLength),
-        fullResponseLength: clampNumber(stored.fullResponseLength, 512, 16384, DEFAULT_SETTINGS.fullResponseLength),
+        fullResponseLength: upgradingToV6 && (!Number.isFinite(storedFullResponseLength) || storedFullResponseLength <= 8192)
+            ? DEFAULT_SETTINGS.fullResponseLength
+            : clampNumber(storedFullResponseLength, 512, 65536, DEFAULT_SETTINGS.fullResponseLength),
         persistentUndo: stored.persistentUndo ?? DEFAULT_SETTINGS.persistentUndo,
         defaultInfluence: IMPACT_LEVELS.includes(stored.defaultInfluence) ? stored.defaultInfluence : DEFAULT_SETTINGS.defaultInfluence,
         confirmImpact: stored.confirmImpact ?? DEFAULT_SETTINGS.confirmImpact,
@@ -169,7 +175,7 @@ function loadSettings() {
             : clampNumber(storedAnalysisLength, 512, 4096, DEFAULT_SETTINGS.analysisResponseLength),
     };
     state.context.extensionSettings[EXTENSION_KEY] = state.settings;
-    if (upgradingToV4 || upgradingToV5) state.context.saveSettingsDebounced();
+    if (upgradingToV4 || upgradingToV5 || upgradingToV6) state.context.saveSettingsDebounced();
 }
 
 function saveSettings() {
@@ -225,7 +231,7 @@ async function mountSettings() {
         saveSettings();
     });
     fullResponseLength.addEventListener('change', () => {
-        state.settings.fullResponseLength = clampNumber(fullResponseLength.value, 512, 16384, DEFAULT_SETTINGS.fullResponseLength);
+        state.settings.fullResponseLength = clampNumber(fullResponseLength.value, 512, 65536, DEFAULT_SETTINGS.fullResponseLength);
         fullResponseLength.value = String(state.settings.fullResponseLength);
         saveSettings();
     });
@@ -466,6 +472,8 @@ function renderSessionTurns(panel) {
                     state.session.reviewPlan = cloneValue(turn.impactPlan);
                     renderImpactPlan(panel);
                 }
+                state.session.generationIncomplete = Boolean(turn.generationIncomplete);
+                state.session.generationSegments = Number(turn.generationSegments) || 1;
                 initializeCandidateReview(panel, turn.candidate);
                 switchWorkspaceView(panel, 'changes');
             }
@@ -523,6 +531,8 @@ function resetSessionForScopeChange(panel) {
     session.proposalCandidate = '';
     session.reviewAudit = null;
     session.acceptedChangeIds = new Set();
+    session.generationIncomplete = false;
+    session.generationSegments = 0;
     panel.querySelector('.story-rewriter-candidate').value = '';
     panel.querySelector('.story-rewriter-preview').hidden = true;
     panel.querySelector('.story-rewriter-impact').hidden = true;
@@ -770,6 +780,31 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
     throw lastError ?? new Error(`${stageLabel}失败。`);
 }
 
+async function generatePlain(prompt, responseLength, session) {
+    if (session.cancelled) throw new Error('已取消本次生成。');
+    let response;
+    if (session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function') {
+        response = await state.context.generateQuietPrompt({
+            quietPrompt: prompt,
+            quietToLoud: false,
+            skipWIAN: false,
+            responseLength,
+            removeReasoning: true,
+            trimToSentence: false,
+        });
+    } else {
+        if (typeof state.context.generateRaw !== 'function') throw new Error('当前 SillyTavern 不提供可用的后台生成接口。');
+        response = await state.context.generateRaw({
+            systemPrompt: 'You are a source-grounded fiction editing agent. Output only the requested story text and terminal marker. Never reveal hidden reasoning.',
+            prompt,
+            responseLength,
+            trimNames: false,
+        });
+    }
+    if (session.cancelled) throw new Error('已取消本次生成。');
+    return String(response ?? '');
+}
+
 function getEffectiveImpactPlan(plan) {
     return {
         ...plan,
@@ -780,6 +815,16 @@ function getEffectiveImpactPlan(plan) {
 
 function getSessionReviewPlan(session) {
     return getEffectiveImpactPlan(session.reviewPlan ?? session.impactPlan);
+}
+
+function createCandidateAudit(session, candidate) {
+    const audit = auditRevision(session.capture.messageText, candidate, getSessionReviewPlan(session));
+    if (session.generationIncomplete) {
+        audit.conflicts.unshift('完整正文未收到结束标记，可能仍被截断。请检查文章结尾；你仍可编辑或确认应用。');
+        audit.hardBlocked = true;
+        audit.requiresOverride = false;
+    }
+    return audit;
 }
 
 function renderImpactPlan(panel) {
@@ -928,7 +973,7 @@ function composeReviewCandidate(panel) {
     );
     session.candidate = candidate;
     panel.querySelector('.story-rewriter-candidate').value = candidate;
-    session.audit = auditRevision(session.capture.messageText, candidate, getSessionReviewPlan(session));
+    session.audit = createCandidateAudit(session, candidate);
     updateAuditPresentation(panel);
     updateReviewSelectionPresentation(panel);
     panel.querySelector('.story-rewriter-apply').disabled = !candidate.trim();
@@ -1027,15 +1072,14 @@ function renderAudit(panel) {
 
 function initializeCandidateReview(panel, candidate, { acceptAll = false, preserveCandidate = false } = {}) {
     const session = state.session;
-    const effectivePlan = getSessionReviewPlan(session);
     session.proposalCandidate = candidate;
-    session.reviewAudit = auditRevision(session.capture.messageText, candidate, effectivePlan);
+    session.reviewAudit = createCandidateAudit(session, candidate);
     session.acceptedChangeIds = new Set(session.reviewAudit.changes
         .filter(change => acceptAll || change.classification !== 'protected')
         .map(change => change.id));
     if (preserveCandidate) {
         session.candidate = candidate;
-        session.audit = auditRevision(session.capture.messageText, candidate, effectivePlan);
+        session.audit = createCandidateAudit(session, candidate);
         renderAudit(panel);
     } else {
         composeReviewCandidate(panel);
@@ -1057,7 +1101,7 @@ function auditCurrentCandidate(panel, { rebuildReview = false } = {}) {
         return;
     }
     if (rebuildReview) return initializeCandidateReview(panel, candidate, { acceptAll: true, preserveCandidate: true });
-    session.audit = auditRevision(session.capture.messageText, candidate, getSessionReviewPlan(session));
+    session.audit = createCandidateAudit(session, candidate);
     renderAudit(panel);
     panel.querySelector('.story-rewriter-apply').disabled = false;
     panel.querySelector('.story-rewriter-replace').disabled = false;
@@ -1071,6 +1115,8 @@ function showCandidate(panel, candidate, instruction) {
         instruction,
         candidate,
         impactPlan: cloneValue(session.impactPlan),
+        generationIncomplete: session.generationIncomplete,
+        generationSegments: session.generationSegments,
         createdAt: new Date().toISOString(),
     });
     if (session.turns.length > MAX_SESSION_TURNS) session.turns.shift();
@@ -1086,9 +1132,12 @@ function showCandidate(panel, candidate, instruction) {
     switchWorkspaceView(panel, 'changes');
     const autoRejected = session.reviewAudit.changes.filter(change => change.classification === 'protected').length;
     const filteredNotice = autoRejected ? `已默认保留原文中的 ${autoRejected} 项疑似越界变化。` : '';
-    panel.querySelector('.story-rewriter-status').textContent = session.audit?.hardBlocked
-        ? `候选已生成。${filteredNotice}合成稿仍有高风险项，请逐块确认；你仍可确认后应用。`
-        : `候选已生成。${filteredNotice}可以逐块确认、继续提出要求，或应用为新版本。`;
+    const continuationNotice = session.generationSegments > 1 ? `已自动续接 ${session.generationSegments} 段。` : '';
+    panel.querySelector('.story-rewriter-status').textContent = session.generationIncomplete
+        ? `候选已保留，但达到总输出预算后仍未收到结束标记。${continuationNotice}请检查文章结尾；你仍可编辑或确认应用。`
+        : session.audit?.hardBlocked
+            ? `候选已生成。${continuationNotice}${filteredNotice}合成稿仍有高风险项，请逐块确认；你仍可确认后应用。`
+            : `候选已生成。${continuationNotice}${filteredNotice}可以逐块确认、继续提出要求，或应用为新版本。`;
 }
 
 async function generateCompleteRevision(panel, instruction) {
@@ -1102,29 +1151,54 @@ async function generateCompleteRevision(panel, instruction) {
         updateContextSummary(panel);
         const originalTokens = await countTokens(session.capture.messageText);
         const desiredResponseLength = desiredRevisionTokens(originalTokens);
-        const revisionPrompt = buildRevisionPrompt({
+        const revisionTask = {
             ...task,
             impactPlan: effectivePlan,
             previousCandidate: panel.querySelector('.story-rewriter-candidate').value.trim() || session.candidate,
             previousInstructions: session.requirements.slice(-MAX_SESSION_TURNS),
-        });
-        const promptTokens = await countTokens(revisionPrompt);
+        };
         const maxContext = limits.maxContext;
-        const availableOutput = maxContext ? Math.floor(maxContext - promptTokens - 512) : desiredResponseLength;
-        if (availableOutput < 512) {
-            throw new Error(`完整候选请求约需 ${formatTokenCount(promptTokens + 512)}，当前预设上限为 ${formatTokenCount(maxContext)}。请缩短原文或资料。`);
+        const singleResponseLimit = limits.maxResponse || desiredResponseLength;
+        let remainingBudget = desiredResponseLength;
+        let prompt = buildRevisionPrompt(revisionTask);
+        let assembled = '';
+        let complete = false;
+        let segments = 0;
+
+        while (!complete && segments < MAX_REVISION_SEGMENTS && remainingBudget >= 256) {
+            const promptTokens = await countTokens(prompt);
+            const availableOutput = maxContext ? Math.floor(maxContext - promptTokens - 512) : remainingBudget;
+            const minimumOutput = segments === 0 ? 512 : 256;
+            if (availableOutput < minimumOutput) {
+                if (!assembled) {
+                    throw new Error(`完整候选请求约需 ${formatTokenCount(promptTokens + minimumOutput)}，当前预设上限为 ${formatTokenCount(maxContext)}。请缩短原文或资料。`);
+                }
+                break;
+            }
+            const responseLength = Math.min(remainingBudget, availableOutput, singleResponseLimit);
+            const raw = await generatePlain(prompt, responseLength, session);
+            const parsed = parseRevisionTextSegment(raw);
+            if (parsed.text) {
+                assembled = segments === 0
+                    ? parsed.text.trim()
+                    : mergeRevisionContinuation(assembled, parsed.text);
+            }
+            complete = parsed.complete;
+            segments++;
+            if (!assembled && !complete) throw new Error('模型没有返回可用的完整候选正文。');
+            if (complete) break;
+
+            const usedTokens = await countTokens(assembled);
+            remainingBudget = Math.max(0, desiredResponseLength - usedTokens);
+            if (remainingBudget < 256) break;
+            panel.querySelector('.story-rewriter-status').textContent = `正文达到单次响应上限，正在自动续接第 ${segments + 1} 段…`;
+            prompt = buildRevisionContinuationPrompt(revisionTask, assembled);
         }
-        const responseLength = Math.min(desiredResponseLength, availableOutput, limits.maxResponse || Number.POSITIVE_INFINITY);
-        const revision = await generateStructured(
-            revisionPrompt,
-            REVISION_JSON_SCHEMA,
-            responseLength,
-            parseRevisionResponse,
-            session,
-            '完整重构',
-        );
+        if (!assembled) throw new Error('模型没有返回可用的完整候选正文。');
         if (state.session !== session || !panel.isConnected || session.cancelled) return;
-        showCandidate(panel, revision.revisedMessage, instruction);
+        session.generationIncomplete = !complete;
+        session.generationSegments = segments;
+        showCandidate(panel, assembled, instruction);
         session.pendingTask = null;
         session.pendingInstruction = '';
     } catch (error) {
@@ -1505,6 +1579,8 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
         pendingInstruction: '',
         cancelled: false,
         activeLimits: null,
+        generationIncomplete: false,
+        generationSegments: 0,
     };
 
     const semantic = true;
@@ -1606,6 +1682,8 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
         if (state.session.scopeMode === 'selection') {
             panel.querySelector('.story-rewriter-apply').disabled = !event.currentTarget.value.trim();
         } else {
+            state.session.generationIncomplete = false;
+            state.session.generationSegments = 0;
             auditCurrentCandidate(panel, { rebuildReview: true });
         }
     });

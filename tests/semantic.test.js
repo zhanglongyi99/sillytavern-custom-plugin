@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
     auditRevision,
     buildImpactPrompt,
+    buildRevisionContinuationPrompt,
     buildRevisionPrompt,
     buildChangedBlocks,
     compactSelectedText,
@@ -11,7 +12,9 @@ import {
     estimateTokenCount,
     getFocusParagraphIds,
     IMPACT_JSON_SCHEMA,
-    parseRevisionResponse,
+    mergeRevisionContinuation,
+    parseRevisionTextSegment,
+    REVISION_END_MARKER,
     retrieveReferences,
     segmentMessage,
     validateImpactPlan,
@@ -139,19 +142,42 @@ test('builds source-grounded two-stage prompts without character offsets', () =>
     assert.match(revisionPrompt, /"originalMessage": "贞德旧计划/);
     assert.match(revisionPrompt, /完整的新消息/);
     assert.match(revisionPrompt, /用户逐块筛选后的当前合成稿/);
+    assert.match(revisionPrompt, new RegExp(REVISION_END_MARKER.replace(/[\[\]]/g, '\\$&')));
+    assert.match(revisionPrompt, /不要输出.*JSON/);
 });
 
-test('parses a fenced structured full revision and rejects internal markers', () => {
-    const parsed = parseRevisionResponse('```json\n{"revisedMessage":"完整文章","changeSummary":[]}\n```');
-    assert.equal(parsed.revisedMessage, '完整文章');
-    assert.throws(() => parseRevisionResponse({
-        revisedMessage: '<story_rewriter_revision_contract>',
-        changeSummary: [],
-    }));
-    assert.throws(() => parseRevisionResponse({
-        revisedMessage: '<system-reminder>内部提示</system-reminder>正文',
-        changeSummary: [],
-    }));
+test('parses terminal markers and detects an incomplete plain-text revision', () => {
+    assert.deepEqual(
+        parseRevisionTextSegment(`第一段。\n\n第二段。\n${REVISION_END_MARKER}`),
+        { text: '第一段。\n\n第二段。', complete: true },
+    );
+    assert.deepEqual(
+        parseRevisionTextSegment('尚未完成的正文'),
+        { text: '尚未完成的正文', complete: false },
+    );
+    assert.deepEqual(
+        parseRevisionTextSegment('\n\n续接段落保留边界\n\n'),
+        { text: '\n\n续接段落保留边界\n\n', complete: false },
+    );
+});
+
+test('builds a continuation request and removes duplicated overlap', () => {
+    const task = {
+        instruction: '继续完成同一篇文章',
+        constraints: '人物设定保持不变',
+        originalMessage: '原文',
+        impactPlan: { focusRegions: [], linkedRegions: [], transitionRegions: [], protectedFacts: [] },
+        references: [{ id: 'lore', sourceType: 'world', authority: 'hard-lore', sourceLabel: '世界书', text: '固定设定' }],
+    };
+    const overlap = '这是用于自动续接去重的一段足够长的共同文本内容';
+    const prompt = buildRevisionContinuationPrompt(task, `前缀${overlap}`);
+    assert.match(prompt, /不要重写、总结、解释或重复已有前缀/);
+    assert.match(prompt, new RegExp(overlap));
+    assert.match(prompt, /固定设定/);
+    assert.equal(
+        mergeRevisionContinuation(`前缀${overlap}`, `${overlap}继续正文`),
+        `前缀${overlap}继续正文`,
+    );
 });
 
 test('audits changes outside the planned region', () => {

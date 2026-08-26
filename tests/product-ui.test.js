@@ -38,11 +38,21 @@ test('reads impact rendering state from the active session', () => {
 });
 
 test('migrates the old impact-analysis budget to a non-truncating default', () => {
-    assert.match(runtime, /settingsVersion: 5/);
+    assert.match(runtime, /settingsVersion: 6/);
     assert.match(runtime, /analysisResponseLength: 4096/);
     assert.match(runtime, /unterminated\|unexpected end\|end of json\|截断/);
     assert.match(runtime, /响应上限/);
     assert.match(runtime, /模型连续两次返回了不完整的影响分析数据/);
+});
+
+test('continues long plain-text revisions instead of wrapping the article in JSON', () => {
+    assert.match(runtime, /MAX_REVISION_SEGMENTS = 8/);
+    assert.match(runtime, /fullResponseLength: 32768/);
+    assert.match(runtime, /buildRevisionContinuationPrompt/);
+    assert.match(runtime, /parseRevisionTextSegment/);
+    assert.match(runtime, /mergeRevisionContinuation/);
+    assert.match(runtime, /正文达到单次响应上限，正在自动续接/);
+    assert.doesNotMatch(runtime, /generateStructured\([\s\S]{0,160}REVISION_JSON_SCHEMA/);
 });
 
 test('keeps final save authority with the user after audit warnings', () => {
