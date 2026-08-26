@@ -1,7 +1,7 @@
 <div id="story_rewriter_settings">
     <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-            <b>故事局部改写</b>
+            <b>故事修改</b>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
@@ -9,53 +9,41 @@
                 <input id="story_rewriter_enabled" type="checkbox">
                 <span>启用故事改写工具</span>
             </label>
-            <small class="story-rewriter-setting-hint">选中文字后提供精确替换和柔性重构；AI 消息工具栏提供全文重构。</small>
+            <small class="story-rewriter-setting-hint">选中文字后点击“修改”；AI 消息工具栏提供“修改这条回复”。默认使用酒馆完整上下文并保存为新版本。</small>
 
-            <label for="story_rewriter_context_mode">默认上下文模式</label>
-            <select id="story_rewriter_context_mode" class="text_pole">
-                <option value="tavern">完整酒馆上下文（推荐）</option>
-                <option value="local">局部快速模式</option>
-            </select>
-            <small class="story-rewriter-setting-hint">完整模式会沿用当前角色卡、世界书、作者注、扩展提示和聊天历史；局部模式只发送选区附近文字。</small>
+            <details class="story-rewriter-advanced-settings">
+                <summary>高级设置</summary>
+                <label for="story_rewriter_context_mode">上下文降级策略</label>
+                <select id="story_rewriter_context_mode" class="text_pole">
+                    <option value="tavern">优先使用完整酒馆上下文</option>
+                    <option value="local">仅使用插件资料（兼容旧配置）</option>
+                </select>
+                <small class="story-rewriter-setting-hint">正常情况下插件会自动使用完整酒馆上下文；只有接口不可用时才降级。</small>
 
-            <label for="story_rewriter_context_chars">局部参考文字数（单侧）</label>
-            <input id="story_rewriter_context_chars" class="text_pole" type="number" min="0" max="8000" step="100">
+                <label for="story_rewriter_context_chars">局部参考文字数（兼容旧配置）</label>
+                <input id="story_rewriter_context_chars" class="text_pole" type="number" min="0" max="8000" step="100">
 
-            <label for="story_rewriter_response_length">最大响应 Token 数</label>
-            <input id="story_rewriter_response_length" class="text_pole" type="number" min="64" max="4096" step="64">
-            <small class="story-rewriter-setting-hint">用于精确局部替换。</small>
+                <label for="story_rewriter_response_length">局部候选最大 Token 数</label>
+                <input id="story_rewriter_response_length" class="text_pole" type="number" min="64" max="4096" step="64">
 
-            <label for="story_rewriter_full_response_length">完整候选最大 Token 数</label>
-            <input id="story_rewriter_full_response_length" class="text_pole" type="number" min="512" max="16384" step="256">
-            <small class="story-rewriter-setting-hint">柔性和全文重构会根据原文长度动态使用该上限。</small>
+                <label for="story_rewriter_full_response_length">完整候选最大 Token 数</label>
+                <input id="story_rewriter_full_response_length" class="text_pole" type="number" min="512" max="16384" step="256">
 
-            <label for="story_rewriter_default_influence">重构默认影响强度</label>
-            <select id="story_rewriter_default_influence" class="text_pole">
-                <option value="strict">严格局部</option>
-                <option value="semantic">语义关联（推荐）</option>
-                <option value="broad">广泛重构</option>
-            </select>
+                <label for="story_rewriter_retrieval_chars">按需资料字符预算</label>
+                <input id="story_rewriter_retrieval_chars" class="text_pole" type="number" min="1000" max="50000" step="1000">
 
-            <label class="checkbox_label" for="story_rewriter_confirm_impact">
-                <input id="story_rewriter_confirm_impact" type="checkbox">
-                <span>生成前确认 Agent 识别的影响范围</span>
-            </label>
-            <small class="story-rewriter-setting-hint">关闭时会自动完成分析与生成；开启后可以取消圈外关联区域。</small>
+                <label for="story_rewriter_retrieval_results">按需资料最大条数</label>
+                <input id="story_rewriter_retrieval_results" class="text_pole" type="number" min="3" max="40" step="1">
 
-            <label for="story_rewriter_retrieval_chars">按需资料字符预算</label>
-            <input id="story_rewriter_retrieval_chars" class="text_pole" type="number" min="1000" max="50000" step="1000">
+                <label for="story_rewriter_analysis_length">影响分析最大 Token 数</label>
+                <input id="story_rewriter_analysis_length" class="text_pole" type="number" min="512" max="4096" step="128">
 
-            <label for="story_rewriter_retrieval_results">按需资料最大条数</label>
-            <input id="story_rewriter_retrieval_results" class="text_pole" type="number" min="3" max="40" step="1">
-
-            <label for="story_rewriter_analysis_length">影响分析最大 Token 数</label>
-            <input id="story_rewriter_analysis_length" class="text_pole" type="number" min="512" max="4096" step="128">
-
-            <label class="checkbox_label" for="story_rewriter_persistent_undo">
-                <input id="story_rewriter_persistent_undo" type="checkbox">
-                <span>在消息工具栏保留撤销入口</span>
-            </label>
-            <small class="story-rewriter-setting-hint">最近 5 次替换记录会保存在聊天消息中，用于跨刷新撤销。</small>
+                <label class="checkbox_label" for="story_rewriter_persistent_undo">
+                    <input id="story_rewriter_persistent_undo" type="checkbox">
+                    <span>保留旧版撤销记录</span>
+                </label>
+                <small class="story-rewriter-setting-hint">主要版本通过 SillyTavern Swipe 回退；此项仅兼容旧的局部替换记录。</small>
+            </details>
         </div>
     </div>
 </div>

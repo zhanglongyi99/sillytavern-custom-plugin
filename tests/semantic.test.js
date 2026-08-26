@@ -84,6 +84,23 @@ test('drops invented impact regions and downgrades unsupported hard facts', () =
     assert.equal(plan.protectedFacts[0].strength, 'soft');
 });
 
+test('accepts model-identified focus regions when the user did not select text', () => {
+    const paragraphs = segmentMessage('贞德旧计划。\n\n玛修保持不变。');
+    const plan = validateImpactPlan({
+        objective: '调整贞德线',
+        subjects: ['贞德'],
+        focusRegions: [{ paragraphId: 'P001', selectedQuote: '贞德旧计划。', reason: '本轮直接目标' }],
+        linkedRegions: [],
+        transitionRegions: [],
+        protectedFacts: [],
+        missingInformation: [],
+        additionalQueries: [],
+        rewritePlan: ['调整第一段'],
+    }, paragraphs, [], []);
+
+    assert.deepEqual(plan.focusRegions.map(item => item.paragraphId), ['P001']);
+});
+
 test('builds source-grounded two-stage prompts without character offsets', () => {
     const paragraphs = segmentMessage('贞德旧计划。\n\n玛修保持不变。');
     const base = {
@@ -138,10 +155,24 @@ test('audits changes outside the planned region', () => {
 });
 
 test('allows complete revision when the whole message is the focus', () => {
-    const plan = { focusRegions: [], linkedRegions: [], transitionRegions: [], protectedFacts: [] };
+    const plan = {
+        focusRegions: [{ paragraphId: 'P001' }, { paragraphId: 'P002' }],
+        linkedRegions: [],
+        transitionRegions: [],
+        protectedFacts: [],
+    };
     const audit = auditRevision('旧第一段。\n\n旧第二段。', '新第一段。\n\n新第二段。', plan, { editMode: 'full' });
     assert.equal(audit.counts.protected, 0);
     assert.equal(audit.hardBlocked, false);
+});
+
+test('does not exempt unselected whole-message edits from scope auditing', () => {
+    const original = '第一段。\n\n第二段。\n\n第三段。\n\n第四段。';
+    const revised = '重写一。\n\n重写二。\n\n重写三。\n\n重写四。';
+    const plan = { focusRegions: [], linkedRegions: [], transitionRegions: [], protectedFacts: [] };
+    const audit = auditRevision(original, revised, plan, { editMode: 'full' });
+    assert.equal(audit.counts.protected, 4);
+    assert.equal(audit.hardBlocked, true);
 });
 
 test('blocks deletion of a hard fact that is explicitly present in the original', () => {

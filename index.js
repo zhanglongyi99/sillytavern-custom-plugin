@@ -32,8 +32,10 @@ const HISTORY_KEY = 'story_rewriter_history';
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
 const CONTEXT_MODES = new Set(['tavern', 'local']);
-const EDIT_MODES = new Set(['precise', 'semantic', 'full']);
+const EDIT_MODES = new Set(['semantic', 'full']);
+const SCOPE_MODES = new Set(['selection', 'smart']);
 const DEFAULT_SETTINGS = Object.freeze({
+    settingsVersion: 4,
     enabled: true,
     contextMode: 'tavern',
     contextCharacters: 2000,
@@ -82,11 +84,15 @@ function clampNumber(value, minimum, maximum, fallback) {
 
 function loadSettings() {
     const stored = state.context.extensionSettings?.[EXTENSION_KEY] ?? {};
+    const upgradingToV4 = Number(stored.settingsVersion ?? 0) < 4;
     state.settings = {
         ...DEFAULT_SETTINGS,
         ...stored,
+        settingsVersion: 4,
         enabled: stored.enabled ?? DEFAULT_SETTINGS.enabled,
-        contextMode: CONTEXT_MODES.has(stored.contextMode) ? stored.contextMode : DEFAULT_SETTINGS.contextMode,
+        contextMode: upgradingToV4
+            ? DEFAULT_SETTINGS.contextMode
+            : CONTEXT_MODES.has(stored.contextMode) ? stored.contextMode : DEFAULT_SETTINGS.contextMode,
         contextCharacters: clampNumber(stored.contextCharacters, 0, 8000, DEFAULT_SETTINGS.contextCharacters),
         responseLength: clampNumber(stored.responseLength, 64, 4096, DEFAULT_SETTINGS.responseLength),
         fullResponseLength: clampNumber(stored.fullResponseLength, 512, 16384, DEFAULT_SETTINGS.fullResponseLength),
@@ -98,6 +104,7 @@ function loadSettings() {
         analysisResponseLength: clampNumber(stored.analysisResponseLength, 512, 4096, DEFAULT_SETTINGS.analysisResponseLength),
     };
     state.context.extensionSettings[EXTENSION_KEY] = state.settings;
+    if (upgradingToV4) state.context.saveSettingsDebounced();
 }
 
 function saveSettings() {
@@ -119,8 +126,6 @@ async function mountSettings() {
     const responseLength = document.querySelector('#story_rewriter_response_length');
     const fullResponseLength = document.querySelector('#story_rewriter_full_response_length');
     const persistentUndo = document.querySelector('#story_rewriter_persistent_undo');
-    const defaultInfluence = document.querySelector('#story_rewriter_default_influence');
-    const confirmImpact = document.querySelector('#story_rewriter_confirm_impact');
     const retrievalCharacters = document.querySelector('#story_rewriter_retrieval_chars');
     const retrievalResults = document.querySelector('#story_rewriter_retrieval_results');
     const analysisResponseLength = document.querySelector('#story_rewriter_analysis_length');
@@ -130,8 +135,6 @@ async function mountSettings() {
     responseLength.value = String(state.settings.responseLength);
     fullResponseLength.value = String(state.settings.fullResponseLength);
     persistentUndo.checked = state.settings.persistentUndo;
-    defaultInfluence.value = state.settings.defaultInfluence;
-    confirmImpact.checked = state.settings.confirmImpact;
     retrievalCharacters.value = String(state.settings.retrievalCharacters);
     retrievalResults.value = String(state.settings.retrievalResults);
     analysisResponseLength.value = String(state.settings.analysisResponseLength);
@@ -166,14 +169,6 @@ async function mountSettings() {
         saveSettings();
         ensureMessageButtons();
     });
-    defaultInfluence.addEventListener('change', () => {
-        state.settings.defaultInfluence = IMPACT_LEVELS.includes(defaultInfluence.value) ? defaultInfluence.value : DEFAULT_SETTINGS.defaultInfluence;
-        saveSettings();
-    });
-    confirmImpact.addEventListener('change', () => {
-        state.settings.confirmImpact = confirmImpact.checked;
-        saveSettings();
-    });
     retrievalCharacters.addEventListener('change', () => {
         state.settings.retrievalCharacters = clampNumber(retrievalCharacters.value, 1000, 50000, DEFAULT_SETTINGS.retrievalCharacters);
         retrievalCharacters.value = String(state.settings.retrievalCharacters);
@@ -197,8 +192,7 @@ function createActionButton() {
     host.className = 'story-rewriter-action story-rewriter-ui';
     host.hidden = true;
     host.innerHTML = `
-        <button type="button" data-edit-mode="precise"><i class="fa-solid fa-scissors" aria-hidden="true"></i><span>精确替换</span></button>
-        <button type="button" data-edit-mode="semantic"><i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i><span>柔性重构</span></button>`;
+        <button type="button" data-edit-mode="semantic" title="修改选中的故事内容"><i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i><span>修改</span></button>`;
     host.addEventListener('mousedown', event => event.preventDefault());
     host.addEventListener('click', event => {
         const mode = event.target.closest?.('[data-edit-mode]')?.dataset.editMode;
@@ -359,7 +353,7 @@ function renderSessionTurns(panel) {
             state.session.candidate = turn.candidate;
             panel.querySelector('.story-rewriter-candidate').value = turn.candidate;
             panel.querySelector('.story-rewriter-preview').hidden = false;
-            if (state.session.editMode === 'precise') {
+            if (state.session.scopeMode === 'selection') {
                 panel.querySelector('.story-rewriter-apply').disabled = false;
             } else {
                 auditCurrentCandidate(panel);
@@ -374,16 +368,50 @@ function renderSessionTurns(panel) {
 
 function updateContextSummary(panel) {
     const fullContext = state.session.contextMode === 'tavern';
-    const semantic = state.session.editMode !== 'precise';
     panel.querySelector('.story-rewriter-context-summary').textContent = fullContext
-        ? semantic
-            ? '酒馆提示链 · 当前完整消息 · 本地按需故事资料'
-            : '角色卡 · 世界书 · 作者注 · 扩展提示 · 当前聊天历史'
-        : semantic
-            ? '当前完整消息 · 本地按需故事资料；不使用酒馆完整提示链'
-            : `仅选区前后各 ${state.settings.contextCharacters} 字`;
+        ? '酒馆提示链 · 当前完整消息 · 本地按需故事资料'
+        : '当前完整消息 · 本地按需故事资料（完整提示链不可用时自动降级）';
     const timelineNotice = panel.querySelector('.story-rewriter-timeline-notice');
     timelineNotice.hidden = !fullContext || state.session.capture.messageId >= state.context.chat.length - 1;
+}
+
+function applyAutomaticContextFallback(panel) {
+    if (state.session?.contextMode !== 'tavern' || typeof state.context.generateQuietPrompt === 'function') return false;
+    state.session.contextMode = 'local';
+    updateContextSummary(panel);
+    return true;
+}
+
+function resetSessionForScopeChange(panel) {
+    const session = state.session;
+    if (!session) return;
+    session.candidate = '';
+    session.requirements = [];
+    session.turns = [];
+    session.repository = null;
+    session.impactPlan = null;
+    session.audit = null;
+    session.pendingTask = null;
+    session.pendingInstruction = '';
+    panel.querySelector('.story-rewriter-candidate').value = '';
+    panel.querySelector('.story-rewriter-preview').hidden = true;
+    panel.querySelector('.story-rewriter-impact').hidden = true;
+    panel.querySelector('.story-rewriter-apply').disabled = true;
+    panel.querySelector('.story-rewriter-replace').disabled = true;
+    panel.querySelector('.story-rewriter-generate').hidden = false;
+    renderSessionTurns(panel);
+}
+
+function updateScopeInterface(panel) {
+    const selectionOnly = state.session?.scopeMode === 'selection';
+    panel.querySelector('.story-rewriter-view-tabs').hidden = selectionOnly;
+    panel.querySelector('.story-rewriter-advanced-actions').hidden = selectionOnly;
+    panel.querySelectorAll('.story-rewriter-view').forEach(section => {
+        section.hidden = section.dataset.view !== 'full';
+    });
+    panel.querySelectorAll('.story-rewriter-view-tab').forEach(button => {
+        button.classList.toggle('is-active', button.dataset.view === 'full');
+    });
 }
 
 function buildSessionTask(instruction, panel) {
@@ -411,16 +439,14 @@ async function generatePreciseCandidate(panel) {
         return;
     }
 
+    const fellBack = applyAutomaticContextFallback(panel);
     setWorkspaceBusy(panel, true, session.contextMode === 'tavern'
         ? '正在通过酒馆完整上下文调用当前模型…'
-        : '正在通过局部上下文调用当前模型…');
+        : fellBack ? '完整上下文接口不可用，已降级到插件资料模式…' : '正在通过插件资料模式调用当前模型…');
     try {
         const task = buildSessionTask(instruction, panel);
         let response;
-        if (session.contextMode === 'tavern') {
-            if (typeof state.context.generateQuietPrompt !== 'function') {
-                throw new Error('当前 SillyTavern 不提供完整上下文后台生成接口。');
-            }
+        if (session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function') {
             response = await state.context.generateQuietPrompt({
                 quietPrompt: buildFullContextRewritePrompt(task),
                 quietToLoud: false,
@@ -431,9 +457,7 @@ async function generatePreciseCandidate(panel) {
                 trimToSentence: false,
             });
         } else {
-            if (typeof state.context.generateRaw !== 'function') {
-                throw new Error('当前 SillyTavern 不提供局部快速生成接口。');
-            }
+            if (typeof state.context.generateRaw !== 'function') throw new Error('当前 SillyTavern 不提供可用的后台生成接口。');
             response = await state.context.generateRaw({
                 systemPrompt: DEFAULT_SYSTEM_PROMPT,
                 prompt: buildRewritePrompt(task),
@@ -456,7 +480,7 @@ async function generatePreciseCandidate(panel) {
         panel.querySelector('.story-rewriter-apply').disabled = false;
         instructionInput.value = '';
         renderSessionTurns(panel);
-        panel.querySelector('.story-rewriter-status').textContent = '候选已生成。可以继续提出要求，或确认替换。';
+        panel.querySelector('.story-rewriter-status').textContent = '新版本已生成。可以继续提出要求或应用为新版本。';
     } catch (error) {
         console.error('[Story Rewriter] generation failed', error);
         panel.querySelector('.story-rewriter-status').textContent = `生成失败：${error.message ?? error}`;
@@ -575,10 +599,7 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
     for (let attempt = 0; attempt < 2; attempt++) {
         if (session.cancelled) throw new Error('已取消本次生成。');
         let response;
-        if (session.contextMode === 'tavern') {
-            if (typeof state.context.generateQuietPrompt !== 'function') {
-                throw new Error('当前 SillyTavern 不提供完整上下文后台生成接口。');
-            }
+        if (session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function') {
             response = await state.context.generateQuietPrompt({
                 quietPrompt: currentPrompt,
                 quietToLoud: false,
@@ -589,9 +610,7 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
                 trimToSentence: false,
             });
         } else {
-            if (typeof state.context.generateRaw !== 'function') {
-                throw new Error('当前 SillyTavern 不提供局部快速生成接口。');
-            }
+            if (typeof state.context.generateRaw !== 'function') throw new Error('当前 SillyTavern 不提供可用的后台生成接口。');
             response = await state.context.generateRaw({
                 systemPrompt: 'You are a source-grounded fiction editing agent. Follow the JSON schema and never reveal hidden reasoning.',
                 prompt: currentPrompt,
@@ -726,7 +745,7 @@ function renderAudit(panel) {
     const session = state.session;
     const audit = session.audit;
     const summary = panel.querySelector('.story-rewriter-audit-summary');
-    const host = panel.querySelector('.story-rewriter-diff');
+    const host = panel.querySelector('.story-rewriter-diff-content');
     host.replaceChildren();
     if (!audit) {
         summary.textContent = '';
@@ -758,16 +777,14 @@ function renderAudit(panel) {
 
 function auditCurrentCandidate(panel) {
     const session = state.session;
-    if (!session || session.editMode === 'precise' || !session.impactPlan) return;
+    if (!session || session.scopeMode === 'selection' || !session.impactPlan) return;
     const candidate = panel.querySelector('.story-rewriter-candidate').value.trim();
     if (!candidate) {
         session.audit = null;
         renderAudit(panel);
         return;
     }
-    session.audit = auditRevision(session.capture.messageText, candidate, getEffectiveImpactPlan(session.impactPlan), {
-        editMode: session.editMode,
-    });
+    session.audit = auditRevision(session.capture.messageText, candidate, getEffectiveImpactPlan(session.impactPlan));
     renderAudit(panel);
     panel.querySelector('.story-rewriter-apply').disabled = session.audit.hardBlocked;
     panel.querySelector('.story-rewriter-replace').disabled = session.audit.hardBlocked;
@@ -783,7 +800,6 @@ function showCandidate(panel, candidate, instruction) {
     panel.querySelector('.story-rewriter-candidate').value = candidate;
     panel.querySelector('.story-rewriter-preview').hidden = false;
     panel.querySelector('.story-rewriter-generate').hidden = false;
-    panel.querySelector('.story-rewriter-continue').hidden = true;
     panel.querySelector('.story-rewriter-apply').disabled = false;
     panel.querySelector('.story-rewriter-replace').disabled = false;
     panel.querySelector('.story-rewriter-instruction').value = '';
@@ -792,7 +808,7 @@ function showCandidate(panel, candidate, instruction) {
     auditCurrentCandidate(panel);
     panel.querySelector('.story-rewriter-status').textContent = session.audit?.hardBlocked
         ? '候选已生成，但审计发现阻断项。请调整要求或候选后重新检查。'
-        : '候选已生成。可以继续提出要求，或保存为新 Swipe。';
+        : '新版本已生成。可以继续提出要求、查看修改，或应用为新版本。';
 }
 
 async function generateCompleteRevision(panel, instruction) {
@@ -814,7 +830,7 @@ async function generateCompleteRevision(panel, instruction) {
         const maxContext = Number(state.context.maxContext) || 0;
         const availableOutput = maxContext ? Math.floor(maxContext - estimateTokenCount(revisionPrompt) - 512) : desiredResponseLength;
         if (availableOutput < 512) {
-            throw new Error('当前完整消息和必要资料已经接近模型上下文上限，无法为完整候选保留足够输出空间。请提高上下文上限、缩短原文，或改用精确替换。');
+            throw new Error('当前完整消息和必要资料已经接近模型上下文上限，无法生成新版本。请提高上下文上限或缩短原文。');
         }
         const responseLength = Math.min(desiredResponseLength, availableOutput);
         const revision = await generateStructured(
@@ -852,13 +868,16 @@ async function generateSemanticCandidate(panel) {
         return;
     }
     session.cancelled = false;
-    session.influence = panel.querySelector('.story-rewriter-influence').value;
+    session.influence = session.scopeMode === 'selection' ? 'strict' : 'semantic';
     const constraints = panel.querySelector('.story-rewriter-constraints').value.trim();
-    setWorkspaceBusy(panel, true, '正在建立本地故事资料视图…');
+    const fellBack = applyAutomaticContextFallback(panel);
+    setWorkspaceBusy(panel, true, fellBack ? '完整上下文接口不可用，已降级并建立故事资料视图…' : '正在建立故事资料视图…');
     try {
         const paragraphs = segmentMessage(session.capture.messageText);
-        const focusIds = getFocusParagraphIds(paragraphs, session.capture.range, session.editMode);
-        if (!focusIds.length) throw new Error('无法把选区映射到原文段落。');
+        const focusIds = session.editMode === 'full'
+            ? []
+            : getFocusParagraphIds(paragraphs, session.capture.range, session.editMode);
+        if (session.editMode !== 'full' && !focusIds.length) throw new Error('无法把选区映射到原文段落。');
         const repository = await buildSemanticRepository(session, instruction, constraints);
         if (session.cancelled) throw new Error('已取消本次生成。');
         session.repository = repository;
@@ -914,12 +933,6 @@ async function generateSemanticCandidate(panel) {
         session.pendingInstruction = instruction;
         renderImpactPlan(panel);
         renderReferences(panel);
-        if (state.settings.confirmImpact) {
-            panel.querySelector('.story-rewriter-generate').hidden = true;
-            panel.querySelector('.story-rewriter-continue').hidden = false;
-            panel.querySelector('.story-rewriter-status').textContent = '影响范围已生成。检查关联区域后继续生成完整候选稿。';
-            return;
-        }
     } catch (error) {
         console.error('[Story Rewriter] impact analysis failed', error);
         panel.querySelector('.story-rewriter-status').textContent = `分析失败：${error.message ?? error}`;
@@ -932,15 +945,8 @@ async function generateSemanticCandidate(panel) {
     await generateCompleteRevision(panel, instruction);
 }
 
-async function continueSemanticGeneration(panel) {
-    const session = state.session;
-    if (!session?.pendingTask || !session.pendingInstruction) return;
-    session.cancelled = false;
-    await generateCompleteRevision(panel, session.pendingInstruction);
-}
-
 async function generateCandidate(panel) {
-    if (state.session?.editMode === 'precise') return generatePreciseCandidate(panel);
+    if (state.session?.scopeMode === 'selection') return generatePreciseCandidate(panel);
     return generateSemanticCandidate(panel);
 }
 
@@ -1002,52 +1008,11 @@ async function persistMessageText(message, nextText, previousText) {
     }
 }
 
-async function applyPreciseCandidate(panel) {
-    const candidate = panel.querySelector('.story-rewriter-candidate').value.trim();
-    if (!candidate) return notify('候选内容不能为空。', 'warning');
-    const capture = state.session?.capture;
-    if (!captureIsCurrent(capture)) {
-        return notify('原消息已变化，未执行替换。', 'warning');
-    }
-
-    const previousText = capture.messageText;
-    const originalSelection = previousText.slice(capture.range.start, capture.range.end);
-    const nextText = replaceRange(previousText, capture.range, candidate);
-    const history = getHistory(capture.message);
-    const previousHistory = history.slice();
-    history.push({
-        start: capture.range.start,
-        before: originalSelection,
-        after: candidate,
-        instruction: state.session.requirements.join('\n'),
-        constraints: panel.querySelector('.story-rewriter-constraints').value.trim(),
-        contextMode: state.session.contextMode,
-        createdAt: new Date().toISOString(),
-    });
-    while (history.length > MAX_HISTORY) history.shift();
-    updateHistory(capture.message, history);
-
-    setWorkspaceBusy(panel, true, '正在写回并保存聊天…');
-    try {
-        await persistMessageText(capture.message, nextText, previousText);
-        closeWorkspace();
-        showUndoSnackbar(capture.message);
-        notify('已替换选中片段。', 'success');
-    } catch (error) {
-        history.splice(0, history.length, ...previousHistory);
-        updateHistory(capture.message, history);
-        ensureMessageButtons();
-        notify(`替换失败：${error.message ?? error}`, 'error');
-        if (panel.isConnected && state.panel === panel) {
-            setWorkspaceBusy(panel, false, `替换失败：${error.message ?? error}`);
-        }
-    }
-}
-
 function createRevisionMetadata(session, audit) {
     return {
         version: 1,
         mode: session.editMode,
+        scope: session.scopeMode,
         originalHash: session.capture.messageHash,
         instruction: session.requirements.at(-1) ?? session.pendingInstruction ?? '',
         requirements: session.requirements.slice(-MAX_SESSION_TURNS),
@@ -1121,11 +1086,29 @@ async function saveSemanticCandidateAsSwipe(panel) {
     if (session.audit?.hardBlocked) return notify('候选存在阻断项，不能保存。', 'warning');
     if (!confirmSoftWarnings(session)) return;
 
-    setWorkspaceBusy(panel, true, '正在保存为新 Swipe…');
+    setWorkspaceBusy(panel, true, '正在应用为新版本…');
     try {
         await persistAsNewSwipe(session.capture.message, candidate, session);
         closeWorkspace();
-        notify('已保存为新 Swipe，原回复仍然保留。', 'success');
+        notify('已应用为新版本，原回复仍然保留。', 'success');
+    } catch (error) {
+        notify(`保存失败：${error.message ?? error}`, 'error');
+        if (panel.isConnected && state.panel === panel) setWorkspaceBusy(panel, false, `保存失败：${error.message ?? error}`);
+    }
+}
+
+async function savePreciseCandidateAsSwipe(panel) {
+    const session = state.session;
+    const candidate = panel.querySelector('.story-rewriter-candidate').value.trim();
+    if (!candidate) return notify('候选内容不能为空。', 'warning');
+    if (!captureIsCurrent(session?.capture)) return notify('原消息、聊天或 Swipe 已变化，未执行保存。', 'warning');
+
+    const nextText = replaceRange(session.capture.messageText, session.capture.range, candidate);
+    setWorkspaceBusy(panel, true, '正在保存为新版本…');
+    try {
+        await persistAsNewSwipe(session.capture.message, nextText, session);
+        closeWorkspace();
+        notify('已应用为新版本，原回复仍然保留。', 'success');
     } catch (error) {
         notify(`保存失败：${error.message ?? error}`, 'error');
         if (panel.isConnected && state.panel === panel) setWorkspaceBusy(panel, false, `保存失败：${error.message ?? error}`);
@@ -1173,7 +1156,7 @@ async function replaceWithSemanticCandidate(panel) {
 }
 
 async function applyCandidate(panel) {
-    if (state.session?.editMode === 'precise') return applyPreciseCandidate(panel);
+    if (state.session?.scopeMode === 'selection') return savePreciseCandidateAsSwipe(panel);
     return saveSemanticCandidateAsSwipe(panel);
 }
 
@@ -1186,19 +1169,7 @@ function switchWorkspaceView(panel, view) {
     });
 }
 
-function invalidatePendingImpact(panel, reason) {
-    const session = state.session;
-    if (!session?.pendingTask || session.candidate) return;
-    session.pendingTask = null;
-    session.pendingInstruction = '';
-    session.impactPlan = null;
-    panel.querySelector('.story-rewriter-impact').hidden = true;
-    panel.querySelector('.story-rewriter-generate').hidden = false;
-    panel.querySelector('.story-rewriter-continue').hidden = true;
-    panel.querySelector('.story-rewriter-status').textContent = `${reason}，请重新分析影响范围。`;
-}
-
-function openRewriteWorkspace(editMode = 'precise', captureOverride = null) {
+function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
     refreshContext();
     const sourceCapture = captureOverride ?? state.capture;
     if (!sourceCapture || !EDIT_MODES.has(editMode)) return;
@@ -1211,16 +1182,17 @@ function openRewriteWorkspace(editMode = 'precise', captureOverride = null) {
         swipeId: sourceCapture.message.swipe_id ?? null,
         messageHash: hashText(sourceCapture.messageText),
     };
+    const hasSelection = editMode !== 'full' && !captureOverride;
     const titles = {
-        precise: '故事精确替换',
-        semantic: '故事柔性重构',
-        full: '故事全文重构',
+        semantic: hasSelection ? '修改选中内容' : '修改这条回复',
+        full: '修改这条回复',
     };
     state.session = {
         capture,
         editMode,
+        scopeMode: 'smart',
         contextMode: state.settings.contextMode,
-        influence: state.settings.defaultInfluence,
+        influence: 'semantic',
         constraints: '',
         requirements: [],
         candidate: '',
@@ -1233,7 +1205,7 @@ function openRewriteWorkspace(editMode = 'precise', captureOverride = null) {
         cancelled: false,
     };
 
-    const semantic = editMode !== 'precise';
+    const semantic = true;
     const panel = document.createElement('aside');
     panel.id = 'story-rewriter-panel';
     panel.className = 'story-rewriter-ui story-rewriter-panel';
@@ -1241,55 +1213,47 @@ function openRewriteWorkspace(editMode = 'precise', captureOverride = null) {
     panel.setAttribute('aria-labelledby', 'story-rewriter-title');
     panel.innerHTML = `
         <header class="story-rewriter-panel-header">
-            <div><h3 id="story-rewriter-title">${titles[editMode]}</h3><small>消息 #${capture.messageId} · ${editMode === 'precise' ? '硬边界' : '生成完整新版本'}</small></div>
+            <div><h3 id="story-rewriter-title">${titles[editMode]}</h3><small>消息 #${capture.messageId} · ${hasSelection ? '从选区开始' : '自动识别修改重点'}</small></div>
             <button type="button" class="story-rewriter-close" aria-label="关闭">×</button>
         </header>
         <div class="story-rewriter-panel-body">
             <section class="story-rewriter-context-card">
-                <label for="story-rewriter-session-context">本次使用的上下文</label>
-                <select id="story-rewriter-session-context" class="text_pole story-rewriter-context-mode">
-                    <option value="tavern">完整酒馆上下文（推荐）</option>
-                    <option value="local">局部快速模式</option>
-                </select>
+                <strong>${hasSelection ? '修改范围' : '修改方式'}</strong>
+                ${hasSelection ? `
+                    <label class="story-rewriter-scope-option"><input type="radio" name="story-rewriter-scope" value="smart" checked><span><b>智能关联调整</b><small>允许同步调整相关伏笔、因果和必要衔接。</small></span></label>
+                    <label class="story-rewriter-scope-option"><input type="radio" name="story-rewriter-scope" value="selection"><span><b>仅改选区</b><small>圈外文字保持不变。</small></span></label>` : '<small>Agent 会根据你的要求识别需要调整的段落，其他内容尽量保持不变。</small>'}
                 <small class="story-rewriter-context-summary"></small>
-                <small class="story-rewriter-timeline-notice">目标是历史消息；完整模式会参考它之后的现有剧情，以减少前后冲突。</small>
-            </section>
-
-            <section class="story-rewriter-influence-card" ${semantic ? '' : 'hidden'}>
-                <label for="story-rewriter-influence">影响强度</label>
-                <select id="story-rewriter-influence" class="text_pole story-rewriter-influence">
-                    <option value="strict">严格局部</option>
-                    <option value="semantic">语义关联（推荐）</option>
-                    <option value="broad">广泛重构</option>
-                </select>
-                <small>选区是关注范围；圈外只有相关伏笔、结果和必要衔接可以联动。</small>
+                <small class="story-rewriter-timeline-notice">目标是历史消息；会参考它之后的现有剧情，以减少前后冲突。</small>
             </section>
 
             <details open>
-                <summary>${editMode === 'full' ? '当前完整消息' : '目标原文'}</summary>
+                <summary>${hasSelection ? '当前选区' : '当前完整消息'}</summary>
                 <textarea class="text_pole story-rewriter-original" rows="6" readonly></textarea>
             </details>
 
-            <label for="story-rewriter-constraints">必须持续保留的约束（可选）</label>
-            <textarea id="story-rewriter-constraints" class="text_pole story-rewriter-constraints" rows="3" placeholder="例如：玛修的身份、性格和其他人物路线保持不变。"></textarea>
-
-            <details class="story-rewriter-impact" hidden open>
-                <summary>Agent 识别的影响范围</summary>
-                <div class="story-rewriter-impact-content"></div>
+            <details class="story-rewriter-constraints-details">
+                <summary>必须保留（可选）</summary>
+                <textarea id="story-rewriter-constraints" class="text_pole story-rewriter-constraints" rows="3" placeholder="例如：玛修的身份、性格和其他人物路线保持不变。"></textarea>
             </details>
 
             <div class="story-rewriter-turns" aria-label="本次编辑历史" hidden></div>
 
             <section class="story-rewriter-preview" hidden>
-                <h4>${semantic ? '完整候选稿' : '原文与当前候选'}</h4>
+                <h4>新版本</h4>
                 <div class="story-rewriter-view-tabs" ${semantic ? '' : 'hidden'}>
-                    <button type="button" class="story-rewriter-view-tab is-active" data-view="changes">重点变化</button>
-                    <button type="button" class="story-rewriter-view-tab" data-view="full">完整候选稿</button>
-                    <button type="button" class="story-rewriter-view-tab" data-view="sources">参考与影响范围</button>
+                    <button type="button" class="story-rewriter-view-tab" data-view="changes">查看修改</button>
+                    <button type="button" class="story-rewriter-view-tab is-active" data-view="full">新版本</button>
+                    <button type="button" class="story-rewriter-view-tab" data-view="sources">使用的资料</button>
                 </div>
                 <div class="story-rewriter-audit-summary"></div>
-                <section class="story-rewriter-view story-rewriter-diff" data-view="changes" ${semantic ? '' : 'hidden'}></section>
-                <section class="story-rewriter-view" data-view="full" ${semantic ? 'hidden' : ''}>
+                <section class="story-rewriter-view story-rewriter-diff" data-view="changes" hidden>
+                    <details class="story-rewriter-impact" hidden open>
+                        <summary>Agent 识别的影响范围</summary>
+                        <div class="story-rewriter-impact-content"></div>
+                    </details>
+                    <div class="story-rewriter-diff-content"></div>
+                </section>
+                <section class="story-rewriter-view" data-view="full">
                     <div class="story-rewriter-compare">
                         <div><span>原文</span><pre class="story-rewriter-compare-original"></pre></div>
                         <div><label for="story-rewriter-candidate">候选（可编辑）</label><textarea id="story-rewriter-candidate" class="text_pole story-rewriter-candidate" rows="14"></textarea></div>
@@ -1303,31 +1267,33 @@ function openRewriteWorkspace(editMode = 'precise', captureOverride = null) {
             <textarea id="story-rewriter-instruction" class="text_pole story-rewriter-instruction" rows="3" placeholder="${semantic ? '例如：这里面的贞德线重新规划一下，其他人物设定保持不变。' : '第一次可以说明完整目标；之后可输入“再克制一点”等继续调整。'}"></textarea>
             <div class="story-rewriter-actions">
                 <button type="button" class="menu_button story-rewriter-cancel" hidden>取消生成</button>
-                <button type="button" class="menu_button story-rewriter-generate">${semantic ? '分析并生成' : '生成候选'}</button>
-                <button type="button" class="menu_button story-rewriter-continue" hidden>继续生成完整候选</button>
-                <button type="button" class="menu_button story-rewriter-apply" disabled>${semantic ? '保存为新 Swipe' : '确认替换'}</button>
-                <button type="button" class="menu_button story-rewriter-replace" ${semantic ? 'disabled' : 'hidden'}>替换当前消息</button>
+                <button type="button" class="menu_button story-rewriter-generate">生成新版本</button>
+                <button type="button" class="menu_button story-rewriter-apply" disabled>应用为新版本</button>
             </div>
-            <div class="story-rewriter-status" role="status" aria-live="polite">${semantic ? '默认需要两次模型调用：影响分析和完整候选生成。' : '选区只决定修改范围；上下文由上方模式决定。'}</div>
+            <details class="story-rewriter-advanced-actions">
+                <summary>高级操作</summary>
+                <button type="button" class="menu_button story-rewriter-replace" disabled>覆盖当前版本</button>
+                <small>危险操作：直接替换当前 Swipe 的完整消息。</small>
+            </details>
+            <div class="story-rewriter-status" role="status" aria-live="polite">会使用酒馆完整上下文，先识别影响范围，再生成新版本。</div>
         </footer>`;
 
-    panel.querySelector('.story-rewriter-original').value = editMode === 'full' ? capture.messageText : capture.range.rawText;
-    panel.querySelector('.story-rewriter-compare-original').textContent = semantic ? capture.messageText : capture.range.rawText;
-    const contextMode = panel.querySelector('.story-rewriter-context-mode');
-    contextMode.value = state.session.contextMode;
-    contextMode.addEventListener('change', () => {
-        state.session.contextMode = CONTEXT_MODES.has(contextMode.value) ? contextMode.value : DEFAULT_SETTINGS.contextMode;
-        state.settings.contextMode = state.session.contextMode;
-        const settingsContextMode = document.querySelector('#story_rewriter_context_mode');
-        if (settingsContextMode) settingsContextMode.value = state.settings.contextMode;
-        saveSettings();
-        updateContextSummary(panel);
-    });
-    const influence = panel.querySelector('.story-rewriter-influence');
-    influence.value = state.session.influence;
-    influence.addEventListener('change', () => {
-        state.session.influence = IMPACT_LEVELS.includes(influence.value) ? influence.value : DEFAULT_SETTINGS.defaultInfluence;
-        invalidatePendingImpact(panel, '影响强度已改变');
+    panel.querySelector('.story-rewriter-original').value = hasSelection ? capture.range.rawText : capture.messageText;
+    panel.querySelector('.story-rewriter-compare-original').textContent = capture.messageText;
+    panel.querySelectorAll('input[name="story-rewriter-scope"]').forEach(input => {
+        input.addEventListener('change', event => {
+            if (!event.currentTarget.checked) return;
+            state.session.scopeMode = SCOPE_MODES.has(event.currentTarget.value) ? event.currentTarget.value : 'smart';
+            resetSessionForScopeChange(panel);
+            const original = panel.querySelector('.story-rewriter-compare-original');
+            if (original) original.textContent = state.session.scopeMode === 'selection'
+                ? state.session.capture.range.rawText
+                : state.session.capture.messageText;
+            panel.querySelector('.story-rewriter-status').textContent = state.session.scopeMode === 'selection'
+                ? '只会生成选区的替换文字，圈外内容保持不变。'
+                : '会识别相关段落并生成完整新版本。';
+            updateScopeInterface(panel);
+        });
     });
     panel.querySelector('.story-rewriter-close').addEventListener('click', closeWorkspace);
     panel.querySelector('.story-rewriter-cancel').addEventListener('click', () => {
@@ -1337,12 +1303,11 @@ function openRewriteWorkspace(editMode = 'precise', captureOverride = null) {
         panel.querySelector('.story-rewriter-status').textContent = '正在取消本次生成…';
     });
     panel.querySelector('.story-rewriter-generate').addEventListener('click', () => generateCandidate(panel));
-    panel.querySelector('.story-rewriter-continue').addEventListener('click', () => continueSemanticGeneration(panel));
     panel.querySelector('.story-rewriter-apply').addEventListener('click', () => applyCandidate(panel));
     panel.querySelector('.story-rewriter-replace').addEventListener('click', () => replaceWithSemanticCandidate(panel));
     panel.querySelector('.story-rewriter-candidate').addEventListener('input', event => {
         state.session.candidate = event.currentTarget.value;
-        if (state.session.editMode === 'precise') {
+        if (state.session.scopeMode === 'selection') {
             panel.querySelector('.story-rewriter-apply').disabled = !event.currentTarget.value.trim();
         } else {
             auditCurrentCandidate(panel);
@@ -1354,22 +1319,13 @@ function openRewriteWorkspace(editMode = 'precise', captureOverride = null) {
             void generateCandidate(panel);
         }
     });
-    panel.querySelector('.story-rewriter-instruction').addEventListener('input', event => {
-        if (state.session?.pendingInstruction && event.currentTarget.value.trim() !== state.session.pendingInstruction) {
-            invalidatePendingImpact(panel, '修改要求已改变');
-        }
-    });
-    panel.querySelector('.story-rewriter-constraints').addEventListener('input', event => {
-        if (state.session?.pendingTask && event.currentTarget.value.trim() !== state.session.pendingTask.constraints) {
-            invalidatePendingImpact(panel, '持续约束已改变');
-        }
-    });
     panel.querySelectorAll('.story-rewriter-view-tab').forEach(button => {
         button.addEventListener('click', () => switchWorkspaceView(panel, button.dataset.view));
     });
     document.body.append(panel);
     state.panel = panel;
     updateContextSummary(panel);
+    updateScopeInterface(panel);
     panel.querySelector('.story-rewriter-instruction').focus();
 }
 
@@ -1452,7 +1408,7 @@ function ensureMessageButtons() {
         } else if (!existingFull) {
             const button = document.createElement('div');
             button.className = 'mes_button story-rewriter-full fa-solid fa-wand-magic-sparkles interactable';
-            button.title = '全文方向重构';
+            button.title = '修改这条回复';
             button.setAttribute('role', 'button');
             button.setAttribute('tabindex', '0');
             host.insertBefore(button, host.querySelector('.mes_edit'));
