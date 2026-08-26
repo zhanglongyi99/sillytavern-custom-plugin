@@ -35,3 +35,11 @@ test('uses the active SillyTavern preset limits and tokenizer for budgeting', ()
 test('reads impact rendering state from the active session', () => {
     assert.match(runtime, /function renderImpactPlan\(panel\)\s*\{[\s\S]*?const session = state\.session;[\s\S]*?const plan = session\?\.impactPlan;/);
 });
+
+test('migrates the old impact-analysis budget to a non-truncating default', () => {
+    assert.match(runtime, /settingsVersion: 5/);
+    assert.match(runtime, /analysisResponseLength: 4096/);
+    assert.match(runtime, /unterminated\|unexpected end\|end of json\|截断/);
+    assert.match(runtime, /响应上限/);
+    assert.match(runtime, /模型连续两次返回了不完整的影响分析数据/);
+});

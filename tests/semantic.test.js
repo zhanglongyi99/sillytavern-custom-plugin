@@ -8,6 +8,7 @@ import {
     createChatChunks,
     estimateTokenCount,
     getFocusParagraphIds,
+    IMPACT_JSON_SCHEMA,
     parseRevisionResponse,
     retrieveReferences,
     segmentMessage,
@@ -127,6 +128,8 @@ test('builds source-grounded two-stage prompts without character offsets', () =>
     const impactPrompt = buildImpactPrompt(base);
     assert.match(impactPrompt, /\[P001\] 贞德旧计划/);
     assert.doesNotMatch(impactPrompt, /"start"\s*:/);
+    assert.match(impactPrompt, /不要复制原文引句/);
+    assert.doesNotMatch(JSON.stringify(IMPACT_JSON_SCHEMA), /selectedQuote|"quote"/);
     const revisionPrompt = buildRevisionPrompt({
         ...base,
         impactPlan: { focusRegions: [{ paragraphId: 'P001' }], linkedRegions: [], transitionRegions: [], protectedFacts: [] },

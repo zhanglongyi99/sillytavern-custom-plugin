@@ -36,7 +36,7 @@ const CONTEXT_MODES = new Set(['tavern', 'local']);
 const EDIT_MODES = new Set(['semantic', 'full']);
 const SCOPE_MODES = new Set(['selection', 'smart']);
 const DEFAULT_SETTINGS = Object.freeze({
-    settingsVersion: 4,
+    settingsVersion: 5,
     enabled: true,
     contextMode: 'tavern',
     contextCharacters: 2000,
@@ -47,7 +47,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     confirmImpact: false,
     retrievalCharacters: 12000,
     retrievalResults: 18,
-    analysisResponseLength: 1400,
+    analysisResponseLength: 4096,
 });
 
 const state = {
@@ -142,11 +142,14 @@ function clampNumber(value, minimum, maximum, fallback) {
 
 function loadSettings() {
     const stored = state.context.extensionSettings?.[EXTENSION_KEY] ?? {};
-    const upgradingToV4 = Number(stored.settingsVersion ?? 0) < 4;
+    const storedVersion = Number(stored.settingsVersion ?? 0);
+    const upgradingToV4 = storedVersion < 4;
+    const upgradingToV5 = storedVersion < 5;
+    const storedAnalysisLength = Number(stored.analysisResponseLength);
     state.settings = {
         ...DEFAULT_SETTINGS,
         ...stored,
-        settingsVersion: 4,
+        settingsVersion: 5,
         enabled: stored.enabled ?? DEFAULT_SETTINGS.enabled,
         contextMode: upgradingToV4
             ? DEFAULT_SETTINGS.contextMode
@@ -159,10 +162,12 @@ function loadSettings() {
         confirmImpact: stored.confirmImpact ?? DEFAULT_SETTINGS.confirmImpact,
         retrievalCharacters: clampNumber(stored.retrievalCharacters, 1000, 50000, DEFAULT_SETTINGS.retrievalCharacters),
         retrievalResults: clampNumber(stored.retrievalResults, 3, 40, DEFAULT_SETTINGS.retrievalResults),
-        analysisResponseLength: clampNumber(stored.analysisResponseLength, 512, 4096, DEFAULT_SETTINGS.analysisResponseLength),
+        analysisResponseLength: upgradingToV5 && (!Number.isFinite(storedAnalysisLength) || storedAnalysisLength <= 1400)
+            ? DEFAULT_SETTINGS.analysisResponseLength
+            : clampNumber(storedAnalysisLength, 512, 4096, DEFAULT_SETTINGS.analysisResponseLength),
     };
     state.context.extensionSettings[EXTENSION_KEY] = state.settings;
-    if (upgradingToV4) state.context.saveSettingsDebounced();
+    if (upgradingToV4 || upgradingToV5) state.context.saveSettingsDebounced();
 }
 
 function saveSettings() {
@@ -436,12 +441,14 @@ function renderSessionTurns(panel) {
 function updateContextSummary(panel) {
     const fullContext = state.session.contextMode === 'tavern';
     const limit = state.session.activeLimits?.maxContext;
+    const responseLimit = state.session.activeLimits?.maxResponse;
     const limitLabel = limit
         ? ` · ${state.session.activeLimits.source === 'preset' ? '当前预设' : '兼容上限'} ${formatTokenCount(limit)}`
         : '';
+    const responseLabel = responseLimit ? ` · 响应上限 ${formatTokenCount(responseLimit)}` : '';
     panel.querySelector('.story-rewriter-context-summary').textContent = (fullContext
         ? '酒馆提示链 · 当前完整消息 · 本地按需故事资料'
-        : '当前完整消息 · 本地按需故事资料（完整提示链不可用时自动降级）') + limitLabel;
+        : '当前完整消息 · 本地按需故事资料（完整提示链不可用时自动降级）') + limitLabel + responseLabel;
     const timelineNotice = panel.querySelector('.story-rewriter-timeline-notice');
     timelineNotice.hidden = !fullContext || state.session.capture.messageId >= state.context.chat.length - 1;
 }
@@ -706,9 +713,15 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
         } catch (error) {
             lastError = error;
             if (attempt === 0) {
-                currentPrompt = `${prompt}\n\n<format_retry>上一次${stageLabel}未返回可解析的严格 JSON：${String(error.message ?? error)}。重新执行原任务，只输出符合 Schema 的 JSON。</format_retry>`;
+                const truncationHint = stageLabel === '影响分析' && /unterminated|unexpected end|end of json|截断/i.test(String(error.message ?? error))
+                    ? '上次输出疑似被截断。必须大幅压缩：不要复制原文，不要输出引句，每个理由只写一句，省略低置信度关联，确保 JSON 完整闭合。'
+                    : '';
+                currentPrompt = `${prompt}\n\n<format_retry>上一次${stageLabel}未返回可解析的严格 JSON：${String(error.message ?? error)}。${truncationHint}重新执行原任务，只输出符合 Schema 的完整 JSON。</format_retry>`;
             }
         }
+    }
+    if (stageLabel === '影响分析' && /json|unterminated|unexpected end|截断/i.test(String(lastError?.message ?? lastError))) {
+        throw new Error('模型连续两次返回了不完整的影响分析数据，通常是响应被截断。请提高当前预设的最大响应 Token，或减少按需资料条数。');
     }
     throw lastError ?? new Error(`${stageLabel}失败。`);
 }
