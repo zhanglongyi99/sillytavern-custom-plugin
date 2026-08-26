@@ -43,3 +43,10 @@ test('migrates the old impact-analysis budget to a non-truncating default', () =
     assert.match(runtime, /响应上限/);
     assert.match(runtime, /模型连续两次返回了不完整的影响分析数据/);
 });
+
+test('keeps final save authority with the user after audit warnings', () => {
+    assert.match(runtime, /function confirmAuditRisks\(session, actionLabel\)/);
+    assert.match(runtime, /审计仅提供风险提示，最终决定权属于你/);
+    assert.doesNotMatch(runtime, /候选存在阻断项，不能保存|候选存在阻断项，不能替换/);
+    assert.doesNotMatch(runtime, /apply\.disabled = !candidate\.value\.trim\(\) \|\|/);
+});

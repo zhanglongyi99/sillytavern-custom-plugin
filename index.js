@@ -396,8 +396,8 @@ function setWorkspaceBusy(panel, busy, status = '') {
     if (!busy) {
         const candidate = panel.querySelector('.story-rewriter-candidate');
         const apply = panel.querySelector('.story-rewriter-apply');
-        if (candidate && apply) apply.disabled = !candidate.value.trim() || Boolean(state.session?.audit?.hardBlocked);
-        panel.querySelector('.story-rewriter-replace')?.toggleAttribute('disabled', !candidate?.value.trim() || Boolean(state.session?.audit?.hardBlocked));
+        if (candidate && apply) apply.disabled = !candidate.value.trim();
+        panel.querySelector('.story-rewriter-replace')?.toggleAttribute('disabled', !candidate?.value.trim());
     }
     panel.querySelector('.story-rewriter-cancel')?.toggleAttribute('hidden', !busy);
     panel.querySelector('.story-rewriter-status').textContent = status;
@@ -846,7 +846,8 @@ function renderAudit(panel) {
         summary.textContent = '';
         return;
     }
-    summary.textContent = `强修改 ${audit.counts.focus} 处 · 关联修改 ${audit.counts.linked} 处 · 衔接调整 ${audit.counts.transition} 处 · 疑似越界 ${audit.counts.protected} 处`;
+    const decisionNotice = audit.hardBlocked || audit.requiresOverride ? ' · 审计仅作提示，最终由你决定' : '';
+    summary.textContent = `强修改 ${audit.counts.focus} 处 · 关联修改 ${audit.counts.linked} 处 · 衔接调整 ${audit.counts.transition} 处 · 疑似越界 ${audit.counts.protected} 处${decisionNotice}`;
     summary.className = `story-rewriter-audit-summary${audit.hardBlocked ? ' is-blocked' : audit.requiresOverride ? ' is-warning' : ''}`;
 
     for (const message of [...audit.conflicts, ...audit.warnings]) {
@@ -881,8 +882,8 @@ function auditCurrentCandidate(panel) {
     }
     session.audit = auditRevision(session.capture.messageText, candidate, getEffectiveImpactPlan(session.impactPlan));
     renderAudit(panel);
-    panel.querySelector('.story-rewriter-apply').disabled = session.audit.hardBlocked;
-    panel.querySelector('.story-rewriter-replace').disabled = session.audit.hardBlocked;
+    panel.querySelector('.story-rewriter-apply').disabled = false;
+    panel.querySelector('.story-rewriter-replace').disabled = false;
 }
 
 function showCandidate(panel, candidate, instruction) {
@@ -902,7 +903,7 @@ function showCandidate(panel, candidate, instruction) {
     renderReferences(panel);
     auditCurrentCandidate(panel);
     panel.querySelector('.story-rewriter-status').textContent = session.audit?.hardBlocked
-        ? '候选已生成，但审计发现阻断项。请调整要求或候选后重新检查。'
+        ? '候选已生成，审计发现高风险项。建议先查看修改；你仍可确认后应用。'
         : '新版本已生成。可以继续提出要求、查看修改，或应用为新版本。';
 }
 
@@ -1171,9 +1172,21 @@ async function persistAsNewSwipe(message, nextText, session) {
     }
 }
 
-function confirmSoftWarnings(session) {
-    if (!session.audit?.requiresOverride) return true;
-    return globalThis.confirm?.('候选稿包含疑似无关修改或长度警告。仍然保存这个版本吗？') ?? false;
+function confirmAuditRisks(session, actionLabel) {
+    const audit = session.audit;
+    if (!audit?.hardBlocked && !audit?.requiresOverride) return true;
+    const messages = [...(audit.conflicts ?? []), ...(audit.warnings ?? [])];
+    const visibleMessages = messages.slice(0, 6).map(message => `• ${String(message).slice(0, 180)}`);
+    if (messages.length > visibleMessages.length) visibleMessages.push(`• 另有 ${messages.length - visibleMessages.length} 项，请在“查看修改”中检查。`);
+    const severity = audit.hardBlocked ? '审计发现高风险项' : '审计发现需要确认的提醒';
+    return globalThis.confirm?.([
+        `${severity}：`,
+        '',
+        ...visibleMessages,
+        '',
+        '审计仅提供风险提示，最终决定权属于你。',
+        `确认${actionLabel}吗？`,
+    ].join('\n')) ?? false;
 }
 
 async function saveSemanticCandidateAsSwipe(panel) {
@@ -1182,8 +1195,7 @@ async function saveSemanticCandidateAsSwipe(panel) {
     if (!candidate) return notify('候选内容不能为空。', 'warning');
     if (!captureIsCurrent(session?.capture)) return notify('原消息、聊天或 Swipe 已变化，未执行保存。', 'warning');
     auditCurrentCandidate(panel);
-    if (session.audit?.hardBlocked) return notify('候选存在阻断项，不能保存。', 'warning');
-    if (!confirmSoftWarnings(session)) return;
+    if (!confirmAuditRisks(session, '应用为新版本')) return;
 
     setWorkspaceBusy(panel, true, '正在应用为新版本…');
     try {
@@ -1220,9 +1232,10 @@ async function replaceWithSemanticCandidate(panel) {
     if (!candidate) return notify('候选内容不能为空。', 'warning');
     if (!captureIsCurrent(session?.capture)) return notify('原消息、聊天或 Swipe 已变化，未执行替换。', 'warning');
     auditCurrentCandidate(panel);
-    if (session.audit?.hardBlocked) return notify('候选存在阻断项，不能替换。', 'warning');
-    if (!confirmSoftWarnings(session)) return;
-    if (!(globalThis.confirm?.('这会替换当前 Swipe 的完整消息。确认继续吗？') ?? false)) return;
+    const hasAuditRisks = Boolean(session.audit?.hardBlocked || session.audit?.requiresOverride);
+    if (hasAuditRisks) {
+        if (!confirmAuditRisks(session, '直接覆盖当前 Swipe')) return;
+    } else if (!(globalThis.confirm?.('这会替换当前 Swipe 的完整消息。确认继续吗？') ?? false)) return;
 
     const previousText = session.capture.messageText;
     const history = getHistory(session.capture.message);
