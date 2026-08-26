@@ -56,6 +56,9 @@ test('continues long plain-text revisions instead of wrapping the article in JSO
     assert.match(runtime, /getTavernReasoningRuntime/);
     assert.match(runtime, /removeReasoningFromString/);
     assert.match(runtime, /模型首轮只返回了推理或空内容，正在自动重试正文/);
+    assert.match(runtime, /assessRevisionCompleteness/);
+    assert.match(runtime, /模型只返回了局部片段，正在重新请求完整消息/);
+    assert.match(runtime, /session\.generationIncomplete && change\.kind === 'deleted'/);
     assert.doesNotMatch(runtime, /generateStructured\([\s\S]{0,160}REVISION_JSON_SCHEMA/);
 });
 

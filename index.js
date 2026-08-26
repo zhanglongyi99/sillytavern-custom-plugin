@@ -8,9 +8,11 @@ import {
     REPLACEMENT_JSON_SCHEMA,
 } from './lib/rewrite.js';
 import {
+    assessRevisionCompleteness,
     auditRevision,
     buildImpactPrompt,
     buildRevisionContinuationPrompt,
+    buildRevisionCoverageRepairPrompt,
     buildRevisionPrompt,
     compactSelectedText,
     composeRevisionFromDecisions,
@@ -485,6 +487,7 @@ function renderSessionTurns(panel) {
                     renderImpactPlan(panel);
                 }
                 state.session.generationIncomplete = Boolean(turn.generationIncomplete);
+                state.session.generationIncompleteReason = String(turn.generationIncompleteReason ?? '');
                 state.session.generationSegments = Number(turn.generationSegments) || 1;
                 initializeCandidateReview(panel, turn.candidate);
                 switchWorkspaceView(panel, 'changes');
@@ -544,6 +547,7 @@ function resetSessionForScopeChange(panel) {
     session.reviewAudit = null;
     session.acceptedChangeIds = new Set();
     session.generationIncomplete = false;
+    session.generationIncompleteReason = '';
     session.generationSegments = 0;
     panel.querySelector('.story-rewriter-candidate').value = '';
     panel.querySelector('.story-rewriter-preview').hidden = true;
@@ -843,7 +847,8 @@ function getSessionReviewPlan(session) {
 function createCandidateAudit(session, candidate) {
     const audit = auditRevision(session.capture.messageText, candidate, getSessionReviewPlan(session));
     if (session.generationIncomplete) {
-        audit.conflicts.unshift('完整正文未收到结束标记，可能仍被截断。请检查文章结尾；你仍可编辑或确认应用。');
+        audit.conflicts.unshift(session.generationIncompleteReason
+            || '完整正文未通过完整性检查。请检查文章结尾；你仍可编辑或确认应用。');
         audit.hardBlocked = true;
         audit.requiresOverride = false;
     }
@@ -1098,7 +1103,8 @@ function initializeCandidateReview(panel, candidate, { acceptAll = false, preser
     session.proposalCandidate = candidate;
     session.reviewAudit = createCandidateAudit(session, candidate);
     session.acceptedChangeIds = new Set(session.reviewAudit.changes
-        .filter(change => acceptAll || change.classification !== 'protected')
+        .filter(change => acceptAll || (change.classification !== 'protected'
+            && !(session.generationIncomplete && change.kind === 'deleted')))
         .map(change => change.id));
     if (preserveCandidate) {
         session.candidate = candidate;
@@ -1139,6 +1145,7 @@ function showCandidate(panel, candidate, instruction) {
         candidate,
         impactPlan: cloneValue(session.impactPlan),
         generationIncomplete: session.generationIncomplete,
+        generationIncompleteReason: session.generationIncompleteReason,
         generationSegments: session.generationSegments,
         createdAt: new Date().toISOString(),
     });
@@ -1157,7 +1164,7 @@ function showCandidate(panel, candidate, instruction) {
     const filteredNotice = autoRejected ? `已默认保留原文中的 ${autoRejected} 项疑似越界变化。` : '';
     const continuationNotice = session.generationSegments > 1 ? `已自动续接 ${session.generationSegments} 段。` : '';
     panel.querySelector('.story-rewriter-status').textContent = session.generationIncomplete
-        ? `候选已保留，但达到总输出预算后仍未收到结束标记。${continuationNotice}请检查文章结尾；你仍可编辑或确认应用。`
+        ? `候选已保留，但未通过完整性检查。${continuationNotice}${session.generationIncompleteReason || '请检查文章结尾。'}你仍可编辑或确认应用。`
         : session.audit?.hardBlocked
             ? `候选已生成。${continuationNotice}${filteredNotice}合成稿仍有高风险项，请逐块确认；你仍可确认后应用。`
             : `候选已生成。${continuationNotice}${filteredNotice}可以逐块确认、继续提出要求，或应用为新版本。`;
@@ -1182,64 +1189,80 @@ async function generateCompleteRevision(panel, instruction) {
         };
         const maxContext = limits.maxContext;
         const singleResponseLimit = limits.maxResponse || desiredResponseLength;
-        let remainingBudget = desiredResponseLength;
-        let prompt = buildRevisionPrompt(revisionTask);
-        let assembled = '';
-        let complete = false;
-        let segments = 0;
+        const runRevision = async initialPrompt => {
+            let remainingBudget = desiredResponseLength;
+            let prompt = initialPrompt;
+            let assembled = '';
+            let complete = false;
+            let segments = 0;
 
-        while (!complete && segments < MAX_REVISION_SEGMENTS && remainingBudget >= 256) {
-            const promptTokens = await countTokens(prompt);
-            const availableOutput = maxContext ? Math.floor(maxContext - promptTokens - 512) : remainingBudget;
-            const minimumOutput = segments === 0 ? 512 : 256;
-            if (availableOutput < minimumOutput) {
-                if (!assembled) {
-                    throw new Error(`完整候选请求约需 ${formatTokenCount(promptTokens + minimumOutput)}，当前预设上限为 ${formatTokenCount(maxContext)}。请缩短原文或资料。`);
+            while (!complete && segments < MAX_REVISION_SEGMENTS && remainingBudget >= 256) {
+                const promptTokens = await countTokens(prompt);
+                const availableOutput = maxContext ? Math.floor(maxContext - promptTokens - 512) : remainingBudget;
+                const minimumOutput = segments === 0 ? 512 : 256;
+                const responseLength = Math.min(remainingBudget, availableOutput, singleResponseLimit);
+                if (availableOutput < minimumOutput || responseLength < minimumOutput) {
+                    if (!assembled) {
+                        throw new Error(`完整候选请求至少需要 ${formatTokenCount(promptTokens + minimumOutput)} 上下文和 ${formatTokenCount(minimumOutput)} 单次响应空间。请检查当前预设上限，或缩短原文与资料。`);
+                    }
+                    break;
                 }
-                break;
-            }
-            const responseLength = Math.min(remainingBudget, availableOutput, singleResponseLimit);
-            let parsed = { text: '', complete: false };
-            for (let emptyAttempt = 0; emptyAttempt < 2; emptyAttempt++) {
-                const requestPrompt = emptyAttempt === 0 ? prompt : [
-                    prompt,
-                    '<empty_response_retry>',
-                    '上一次响应没有任何可用正文，可能只生成了推理内容或空的结束标记。不要分析，不要说明原因；立即从正文第一个字符（续接时为下一个字符）开始输出，并在真正完成后追加结束标记。',
-                    '</empty_response_retry>',
-                ].join('\n\n');
-                const raw = await generatePlain(requestPrompt, responseLength, session);
-                parsed = parseRevisionTextSegment(raw);
-                if (parsed.text || (parsed.complete && assembled)) break;
-                console.warn('[Story Rewriter] model returned no usable revision text', {
-                    segment: segments + 1,
-                    attempt: emptyAttempt + 1,
-                    responseCharacters: raw.length,
-                });
-                if (emptyAttempt === 0) {
-                    panel.querySelector('.story-rewriter-status').textContent = '模型首轮只返回了推理或空内容，正在自动重试正文…';
+                let parsed = { text: '', complete: false };
+                for (let emptyAttempt = 0; emptyAttempt < 2; emptyAttempt++) {
+                    const requestPrompt = emptyAttempt === 0 ? prompt : [
+                        prompt,
+                        '<empty_response_retry>',
+                        '上一次响应没有任何可用正文，可能只生成了推理内容或空的结束标记。不要分析，不要说明原因；立即从正文第一个字符（续接时为下一个字符）开始输出，并在真正完成后追加结束标记。',
+                        '</empty_response_retry>',
+                    ].join('\n\n');
+                    const raw = await generatePlain(requestPrompt, responseLength, session);
+                    parsed = parseRevisionTextSegment(raw);
+                    if (parsed.text || (parsed.complete && assembled)) break;
+                    console.warn('[Story Rewriter] model returned no usable revision text', {
+                        segment: segments + 1,
+                        attempt: emptyAttempt + 1,
+                        responseCharacters: raw.length,
+                    });
+                    if (emptyAttempt === 0) {
+                        panel.querySelector('.story-rewriter-status').textContent = '模型首轮只返回了推理或空内容，正在自动重试正文…';
+                    }
                 }
-            }
-            if (parsed.text) {
-                assembled = segments === 0
-                    ? parsed.text.trim()
-                    : mergeRevisionContinuation(assembled, parsed.text);
-            }
-            complete = parsed.complete;
-            segments++;
-            if (!assembled) throw new Error('模型连续两次只返回了推理或空内容。请检查当前预设的推理格式与最大响应 Token，或稍后重试。');
-            if (complete) break;
+                if (parsed.text) {
+                    assembled = segments === 0
+                        ? parsed.text.trim()
+                        : mergeRevisionContinuation(assembled, parsed.text);
+                }
+                complete = parsed.complete;
+                segments++;
+                if (!assembled) throw new Error('模型连续两次只返回了推理或空内容。请检查当前预设的推理格式与最大响应 Token，或稍后重试。');
+                if (complete) break;
 
-            const usedTokens = await countTokens(assembled);
-            remainingBudget = Math.max(0, desiredResponseLength - usedTokens);
-            if (remainingBudget < 256) break;
-            panel.querySelector('.story-rewriter-status').textContent = `正文达到单次响应上限，正在自动续接第 ${segments + 1} 段…`;
-            prompt = buildRevisionContinuationPrompt(revisionTask, assembled);
+                const usedTokens = await countTokens(assembled);
+                remainingBudget = Math.max(0, desiredResponseLength - usedTokens);
+                if (remainingBudget < 256) break;
+                panel.querySelector('.story-rewriter-status').textContent = `正文达到单次响应上限，正在自动续接第 ${segments + 1} 段…`;
+                prompt = buildRevisionContinuationPrompt(revisionTask, assembled);
+            }
+            return { assembled, complete, segments };
+        };
+
+        let result = await runRevision(buildRevisionPrompt(revisionTask));
+        let coverage = assessRevisionCompleteness(session.capture.messageText, result.assembled, effectivePlan, instruction);
+        if (result.complete && !coverage.complete) {
+            panel.querySelector('.story-rewriter-status').textContent = '模型只返回了局部片段，正在重新请求完整消息…';
+            result = await runRevision(buildRevisionCoverageRepairPrompt(revisionTask, coverage));
+            coverage = assessRevisionCompleteness(session.capture.messageText, result.assembled, effectivePlan, instruction);
         }
-        if (!assembled) throw new Error('模型没有返回可用的完整候选正文。');
+        if (!result.assembled) throw new Error('模型没有返回可用的完整候选正文。');
         if (state.session !== session || !panel.isConnected || session.cancelled) return;
-        session.generationIncomplete = !complete;
-        session.generationSegments = segments;
-        showCandidate(panel, assembled, instruction);
+        session.generationIncomplete = !result.complete || !coverage.complete;
+        session.generationIncompleteReason = !result.complete
+            ? '没有收到正文结束标记，可能仍被截断。请检查文章结尾。'
+            : !coverage.complete
+                ? `候选只有原文约 ${Math.round(coverage.lengthRatio * 100)}%，不足以覆盖应保留内容。请检查全文。`
+                : '';
+        session.generationSegments = result.segments;
+        showCandidate(panel, result.assembled, instruction);
         session.pendingTask = null;
         session.pendingInstruction = '';
     } catch (error) {
@@ -1621,6 +1644,7 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
         cancelled: false,
         activeLimits: null,
         generationIncomplete: false,
+        generationIncompleteReason: '',
         generationSegments: 0,
     };
 
@@ -1724,6 +1748,7 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
             panel.querySelector('.story-rewriter-apply').disabled = !event.currentTarget.value.trim();
         } else {
             state.session.generationIncomplete = false;
+            state.session.generationIncompleteReason = '';
             state.session.generationSegments = 0;
             auditCurrentCandidate(panel, { rebuildReview: true });
         }

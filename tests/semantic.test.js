@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+    assessRevisionCompleteness,
     auditRevision,
     buildImpactPrompt,
     buildRevisionContinuationPrompt,
+    buildRevisionCoverageRepairPrompt,
     buildRevisionPrompt,
     buildChangedBlocks,
     compactSelectedText,
@@ -192,6 +194,49 @@ test('builds a continuation request and removes duplicated overlap', () => {
     );
 });
 
+test('rejects a short fragment that cannot cover protected paragraphs', () => {
+    const original = [
+        `重点段落：${'需要修改'.repeat(20)}`,
+        `保护段落一：${'必须保留'.repeat(70)}`,
+        `保护段落二：${'世界设定'.repeat(70)}`,
+    ].join('\n\n');
+    const plan = {
+        focusRegions: [{ paragraphId: 'P001' }],
+        linkedRegions: [],
+        transitionRegions: [],
+        protectedFacts: [],
+    };
+    const assessment = assessRevisionCompleteness(original, '这里只返回了修改后的重点片段。', plan);
+    assert.equal(assessment.complete, false);
+    assert.ok(assessment.minimumCharacters > assessment.candidateCharacters);
+    const repairPrompt = buildRevisionCoverageRepairPrompt({
+        editMode: 'semantic',
+        influence: 'semantic',
+        instruction: '修改重点',
+        constraints: '',
+        originalMessage: original,
+        selectedText: '',
+        focusIds: ['P001'],
+        impactPlan: plan,
+        references: [],
+    }, assessment);
+    assert.match(repairPrompt, /局部片段/);
+    assert.match(repairPrompt, /保护区尽量逐字复制/);
+});
+
+test('only accepts a very short whole-message candidate when shortening was explicitly requested', () => {
+    const original = `${'第一段全文重写。'.repeat(40)}\n\n${'第二段全文重写。'.repeat(40)}`;
+    const plan = {
+        focusRegions: [{ paragraphId: 'P001' }, { paragraphId: 'P002' }],
+        linkedRegions: [],
+        transitionRegions: [],
+    };
+    assert.equal(assessRevisionCompleteness(original, '过短的重构结果。', plan, '重新梳理人物线').complete, false);
+    const assessment = assessRevisionCompleteness(original, '用户要求的精简全文。', plan, '把全文压缩成摘要');
+    assert.equal(assessment.complete, true);
+    assert.equal(assessment.shorteningRequested, true);
+});
+
 test('audits changes outside the planned region', () => {
     const original = '贞德原计划。\n\n玛修保持克制。\n\n其他内容不变。\n\n结尾不变。';
     const revised = '贞德采用新计划。\n\n玛修突然暴怒。\n\n其他内容彻底重写。\n\n结尾也改了。';
@@ -223,6 +268,38 @@ test('composes a revision from independently accepted change blocks', () => {
     assert.equal(
         composeRevisionFromDecisions(original, revised, new Set(['C002'])),
         '第一段不变。\n\n第二段旧文。\n\n新增段落。\n\n第三段不变。',
+    );
+});
+
+test('keeps rewritten paragraphs aligned after a leading insertion', () => {
+    const original = '贞德在教堂等待旧计划。\n\n玛修留在基地保持警戒。\n\n黄毛准备第二天的行动。';
+    const revised = '新增的前情导语。\n\n贞德在教堂开始执行新计划。\n\n玛修仍在基地保持警戒。\n\n黄毛开始准备次日行动。';
+    const changes = buildChangedBlocks(segmentMessage(original), segmentMessage(revised));
+    assert.deepEqual(changes.map(change => [change.kind, change.originalId, change.anchorId]), [
+        ['inserted', null, 'P001'],
+        ['modified', 'P001', 'P001'],
+        ['modified', 'P002', 'P002'],
+        ['modified', 'P003', 'P003'],
+    ]);
+    assert.equal(
+        composeRevisionFromDecisions(original, revised, new Set(['C002'])),
+        '贞德在教堂开始执行新计划。\n\n玛修留在基地保持警戒。\n\n黄毛准备第二天的行动。',
+    );
+});
+
+test('places a lone smart-rewrite fragment back onto its most similar source paragraph', () => {
+    const original = '玛修留在基地等待命令。\n\n贞德在教堂执行旧计划并等待黄毛。\n\n凛奴负责外围调查。\n\n黄毛准备第二天的行动。';
+    const fragment = '贞德改为在教堂主动协助黄毛执行新计划。';
+    const changes = buildChangedBlocks(segmentMessage(original), segmentMessage(fragment));
+    assert.deepEqual(changes.map(change => [change.kind, change.originalId]), [
+        ['deleted', 'P001'],
+        ['modified', 'P002'],
+        ['deleted', 'P003'],
+        ['deleted', 'P004'],
+    ]);
+    assert.equal(
+        composeRevisionFromDecisions(original, fragment, new Set(['C002'])),
+        '玛修留在基地等待命令。\n\n贞德改为在教堂主动协助黄毛执行新计划。\n\n凛奴负责外围调查。\n\n黄毛准备第二天的行动。',
     );
 });
 
