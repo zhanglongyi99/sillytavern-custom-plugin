@@ -18,6 +18,6 @@ test('declares the standard SillyTavern frontend extension entry points', () => 
 });
 
 test('publishes the preset-context synchronization release metadata', () => {
-    assert.equal(manifest.version, '0.4.2');
+    assert.equal(manifest.version, '0.4.3');
     assert.equal(manifest.display_name, '故事改写');
 });

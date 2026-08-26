@@ -31,3 +31,7 @@ test('uses the active SillyTavern preset limits and tokenizer for budgeting', ()
     assert.match(runtime, /getTokenCountAsync/);
     assert.match(runtime, /当前预设/);
 });
+
+test('reads impact rendering state from the active session', () => {
+    assert.match(runtime, /function renderImpactPlan\(panel\)\s*\{[\s\S]*?const session = state\.session;[\s\S]*?const plan = session\?\.impactPlan;/);
+});

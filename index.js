@@ -724,7 +724,8 @@ function getEffectiveImpactPlan(plan) {
 function renderImpactPlan(panel) {
     const host = panel.querySelector('.story-rewriter-impact-content');
     host.replaceChildren();
-    const plan = state.session.impactPlan;
+    const session = state.session;
+    const plan = session?.impactPlan;
     if (!plan) return;
 
     const summary = document.createElement('p');
