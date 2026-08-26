@@ -11,6 +11,7 @@ import {
     auditRevision,
     buildImpactPrompt,
     buildRevisionPrompt,
+    compactSelectedText,
     createCharacterChunks,
     createChatChunks,
     createWorldInfoChunks,
@@ -65,10 +66,67 @@ const state = {
     sessionHistory: new WeakMap(),
 };
 
+let tavernRuntimePromise = null;
+
 function refreshContext() {
     const context = globalThis.SillyTavern?.getContext?.();
     if (context) state.context = context;
     return state.context;
+}
+
+async function getTavernRuntime() {
+    if (!tavernRuntimePromise) {
+        const runtimeUrl = new URL('../../../../script.js', import.meta.url);
+        tavernRuntimePromise = import(runtimeUrl.href).catch(error => {
+            console.warn('[Story Rewriter] unable to load SillyTavern generation limits', error);
+            return null;
+        });
+    }
+    return tavernRuntimePromise;
+}
+
+async function getActiveGenerationLimits() {
+    refreshContext();
+    let maxContext = 0;
+    let maxResponse = 0;
+    let source = 'fallback';
+    const runtime = await getTavernRuntime();
+    try {
+        maxContext = Number(runtime?.getMaxContextTokens?.()) || 0;
+        maxResponse = Number(runtime?.getMaxResponseTokens?.()) || 0;
+        if (maxContext > 0) source = 'preset';
+    } catch (error) {
+        console.warn('[Story Rewriter] unable to read active SillyTavern preset limits', error);
+    }
+    if (maxContext <= 0) maxContext = Number(state.context?.maxContext) || 0;
+    return { maxContext, maxResponse, source };
+}
+
+async function countTokens(text) {
+    refreshContext();
+    if (typeof state.context?.getTokenCountAsync === 'function') {
+        try {
+            const count = Number(await state.context.getTokenCountAsync(String(text ?? '')));
+            if (Number.isFinite(count) && count >= 0) return count;
+        } catch (error) {
+            console.warn('[Story Rewriter] current tokenizer failed; using conservative estimate', error);
+        }
+    }
+    return estimateTokenCount(text);
+}
+
+function formatTokenCount(value) {
+    const count = Math.max(0, Number(value) || 0);
+    return count >= 100000
+        ? `${(count / 10000).toLocaleString(undefined, { maximumFractionDigits: 1 })} 万 Token`
+        : `${Math.round(count).toLocaleString()} Token`;
+}
+
+function desiredRevisionTokens(originalTokens) {
+    return Math.min(
+        state.settings.fullResponseLength,
+        Math.max(1024, Math.ceil(originalTokens * 1.15) + 256),
+    );
 }
 
 function notify(message, type = 'info') {
@@ -377,11 +435,24 @@ function renderSessionTurns(panel) {
 
 function updateContextSummary(panel) {
     const fullContext = state.session.contextMode === 'tavern';
-    panel.querySelector('.story-rewriter-context-summary').textContent = fullContext
+    const limit = state.session.activeLimits?.maxContext;
+    const limitLabel = limit
+        ? ` · ${state.session.activeLimits.source === 'preset' ? '当前预设' : '兼容上限'} ${formatTokenCount(limit)}`
+        : '';
+    panel.querySelector('.story-rewriter-context-summary').textContent = (fullContext
         ? '酒馆提示链 · 当前完整消息 · 本地按需故事资料'
-        : '当前完整消息 · 本地按需故事资料（完整提示链不可用时自动降级）';
+        : '当前完整消息 · 本地按需故事资料（完整提示链不可用时自动降级）') + limitLabel;
     const timelineNotice = panel.querySelector('.story-rewriter-timeline-notice');
     timelineNotice.hidden = !fullContext || state.session.capture.messageId >= state.context.chat.length - 1;
+}
+
+async function syncContextSummary(panel) {
+    const session = state.session;
+    const limits = await getActiveGenerationLimits();
+    if (state.session !== session || !panel.isConnected) return limits;
+    session.activeLimits = limits;
+    updateContextSummary(panel);
+    return limits;
 }
 
 function applyAutomaticContextFallback(panel) {
@@ -453,6 +524,7 @@ async function generatePreciseCandidate(panel) {
         ? '正在通过酒馆完整上下文调用当前模型…'
         : fellBack ? '完整上下文接口不可用，已降级到插件资料模式…' : '正在通过插件资料模式调用当前模型…');
     try {
+        await syncContextSummary(panel);
         const task = buildSessionTask(instruction, panel);
         let response;
         if (session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function') {
@@ -573,12 +645,12 @@ async function buildSemanticRepository(session, instruction, constraints) {
         constraints,
         ...session.requirements.slice(-3),
     ].filter(Boolean).join('\n');
-    const desiredOutput = Math.min(
-        state.settings.fullResponseLength,
-        Math.max(1024, Math.ceil(session.capture.messageText.length * 0.8) + 512),
-    );
-    const maxContext = Number(state.context.maxContext) || 0;
-    const baseTokens = estimateTokenCount([session.capture.messageText, instruction, constraints].join('\n')) + 1800;
+    const limits = session.activeLimits ?? await getActiveGenerationLimits();
+    session.activeLimits = limits;
+    const originalTokens = await countTokens(session.capture.messageText);
+    const desiredOutput = desiredRevisionTokens(originalTokens);
+    const maxContext = limits.maxContext;
+    const baseTokens = await countTokens([session.capture.messageText, instruction, constraints].join('\n')) + 1800;
     const availableRetrievalTokens = maxContext ? maxContext - baseTokens - desiredOutput : Number.POSITIVE_INFINITY;
     const contextCharacterBudget = Number.isFinite(availableRetrievalTokens)
         ? Math.max(0, Math.floor(availableRetrievalTokens * 2))
@@ -826,22 +898,24 @@ async function generateCompleteRevision(panel, instruction) {
     const effectivePlan = getEffectiveImpactPlan(session.impactPlan);
     setWorkspaceBusy(panel, true, '正在生成完整候选稿…');
     try {
-        const desiredResponseLength = Math.min(
-            state.settings.fullResponseLength,
-            Math.max(1024, Math.ceil(session.capture.messageText.length * 0.8) + 512),
-        );
+        const limits = session.activeLimits ?? await getActiveGenerationLimits();
+        session.activeLimits = limits;
+        updateContextSummary(panel);
+        const originalTokens = await countTokens(session.capture.messageText);
+        const desiredResponseLength = desiredRevisionTokens(originalTokens);
         const revisionPrompt = buildRevisionPrompt({
             ...task,
             impactPlan: effectivePlan,
             previousCandidate: panel.querySelector('.story-rewriter-candidate').value.trim() || session.candidate,
             previousInstructions: session.requirements.slice(-MAX_SESSION_TURNS),
         });
-        const maxContext = Number(state.context.maxContext) || 0;
-        const availableOutput = maxContext ? Math.floor(maxContext - estimateTokenCount(revisionPrompt) - 512) : desiredResponseLength;
+        const promptTokens = await countTokens(revisionPrompt);
+        const maxContext = limits.maxContext;
+        const availableOutput = maxContext ? Math.floor(maxContext - promptTokens - 512) : desiredResponseLength;
         if (availableOutput < 512) {
-            throw new Error('当前完整消息和必要资料已经接近模型上下文上限，无法生成新版本。请提高上下文上限或缩短原文。');
+            throw new Error(`完整候选请求约需 ${formatTokenCount(promptTokens + 512)}，当前预设上限为 ${formatTokenCount(maxContext)}。请缩短原文或资料。`);
         }
-        const responseLength = Math.min(desiredResponseLength, availableOutput);
+        const responseLength = Math.min(desiredResponseLength, availableOutput, limits.maxResponse || Number.POSITIVE_INFINITY);
         const revision = await generateStructured(
             revisionPrompt,
             REVISION_JSON_SCHEMA,
@@ -882,6 +956,7 @@ async function generateSemanticCandidate(panel) {
     const fellBack = applyAutomaticContextFallback(panel);
     setWorkspaceBusy(panel, true, fellBack ? '完整上下文接口不可用，已降级并建立故事资料视图…' : '正在建立故事资料视图…');
     try {
+        const limits = await syncContextSummary(panel);
         const paragraphs = segmentMessage(session.capture.messageText);
         const focusIds = session.editMode === 'full'
             ? []
@@ -913,21 +988,22 @@ async function generateSemanticCandidate(panel) {
             instruction,
             constraints,
             originalMessage: session.capture.messageText,
-            selectedText: session.capture.selectedText,
+            selectedText: focusIds.length ? compactSelectedText(session.capture.selectedText) : '',
             paragraphs,
             focusIds,
             references: [...mandatoryReferences, ...repository.retrieval.items],
         };
         const impactPrompt = buildImpactPrompt(task);
-        const maxContext = Number(state.context.maxContext) || 0;
-        const availableAnalysisOutput = maxContext ? Math.floor(maxContext - estimateTokenCount(impactPrompt) - 256) : state.settings.analysisResponseLength;
+        const promptTokens = await countTokens(impactPrompt);
+        const maxContext = limits.maxContext;
+        const availableAnalysisOutput = maxContext ? Math.floor(maxContext - promptTokens - 256) : state.settings.analysisResponseLength;
         if (availableAnalysisOutput < 512) {
-            throw new Error('当前消息与资料超过模型上下文空间，无法完成影响分析。请降低资料预算、提高上下文上限，或缩小编辑目标。');
+            throw new Error(`影响分析请求约需 ${formatTokenCount(promptTokens + 256)}，当前预设上限为 ${formatTokenCount(maxContext)}。请降低资料预算或缩小编辑目标。`);
         }
         const rawPlan = await generateStructured(
             impactPrompt,
             IMPACT_JSON_SCHEMA,
-            Math.min(state.settings.analysisResponseLength, availableAnalysisOutput),
+            Math.min(state.settings.analysisResponseLength, availableAnalysisOutput, limits.maxResponse || Number.POSITIVE_INFINITY),
             parseImpactResponse,
             session,
             '影响分析',
@@ -1212,6 +1288,7 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
         pendingTask: null,
         pendingInstruction: '',
         cancelled: false,
+        activeLimits: null,
     };
 
     const semantic = true;
@@ -1334,6 +1411,7 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
     document.body.append(panel);
     state.panel = panel;
     updateContextSummary(panel);
+    void syncContextSummary(panel);
     updateScopeInterface(panel);
     panel.querySelector('.story-rewriter-instruction').focus();
 }

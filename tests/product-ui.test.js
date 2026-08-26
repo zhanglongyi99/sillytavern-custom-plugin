@@ -24,3 +24,10 @@ test('recovers a long auto-scrolled selection when pointer release is lost', () 
     assert.match(runtime, /addEventListener\('touchend', onSelectionPointerUp/);
     assert.match(runtime, /addEventListener\('contextmenu', onSelectionPointerUp/);
 });
+
+test('uses the active SillyTavern preset limits and tokenizer for budgeting', () => {
+    assert.match(runtime, /getMaxContextTokens/);
+    assert.match(runtime, /getMaxResponseTokens/);
+    assert.match(runtime, /getTokenCountAsync/);
+    assert.match(runtime, /当前预设/);
+});

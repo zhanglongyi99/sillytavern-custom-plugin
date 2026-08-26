@@ -4,6 +4,7 @@ import {
     auditRevision,
     buildImpactPrompt,
     buildRevisionPrompt,
+    compactSelectedText,
     createChatChunks,
     estimateTokenCount,
     getFocusParagraphIds,
@@ -45,6 +46,15 @@ test('retrieves relevant character history while respecting source quotas', () =
 
 test('estimates CJK text more conservatively than Latin text', () => {
     assert.ok(estimateTokenCount('这是十二个左右的中文字符') > estimateTokenCount('this is a similar length'));
+});
+
+test('compacts a long selection without losing its boundary cues', () => {
+    const text = `开头${'中间'.repeat(2000)}结尾`;
+    const compact = compactSelectedText(text, 200);
+    assert.ok(compact.length <= 200);
+    assert.match(compact, /^开头/);
+    assert.match(compact, /结尾$/);
+    assert.match(compact, /focusParagraphIds/);
 });
 
 test('does not retrieve authoritative but unrelated lore', () => {
