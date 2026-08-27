@@ -53,13 +53,22 @@ test('continues long plain-text revisions instead of wrapping the article in JSO
     assert.match(runtime, /mergeRevisionContinuation/);
     assert.match(runtime, /正文达到单次响应上限，正在自动续接/);
     assert.match(runtime, /removeReasoning: false/);
-    assert.match(runtime, /getTavernReasoningRuntime/);
-    assert.match(runtime, /removeReasoningFromString/);
+    assert.match(runtime, /parseReasoningFromString/);
+    assert.doesNotMatch(runtime, /scripts\/reasoning\.js/);
     assert.match(runtime, /模型首轮只返回了推理或空内容，正在自动重试正文/);
     assert.match(runtime, /assessRevisionCompleteness/);
     assert.match(runtime, /模型只返回了局部片段，正在重新请求完整消息/);
     assert.match(runtime, /session\.generationIncomplete && change\.kind === 'deleted'/);
     assert.doesNotMatch(runtime, /generateStructured\([\s\S]{0,160}REVISION_JSON_SCHEMA/);
+});
+
+test('keeps Tavern context authoritative and degrades by capability', () => {
+    assert.match(runtime, /session\.contextMode === 'local'/);
+    assert.match(runtime, /getWorldInfoPrompt/);
+    assert.doesNotMatch(runtime, /loadWorldInfo\?\./);
+    assert.match(runtime, /jsonSchema: attempt === 0 \? schema : null/);
+    assert.match(runtime, /createConservativeImpactPlan/);
+    assert.doesNotMatch(runtime, /confidence >= 0\.85|confidence >= 0\.75/);
 });
 
 test('keeps final save authority with the user after audit warnings', () => {

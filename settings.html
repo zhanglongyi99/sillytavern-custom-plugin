@@ -16,7 +16,7 @@
                 <label for="story_rewriter_context_mode">上下文降级策略</label>
                 <select id="story_rewriter_context_mode" class="text_pole">
                     <option value="tavern">优先使用完整酒馆上下文</option>
-                    <option value="local">仅使用插件资料（兼容旧配置）</option>
+                    <option value="local">使用本地上下文快照（兼容旧配置）</option>
                 </select>
                 <small class="story-rewriter-setting-hint">正常情况下插件会自动使用完整酒馆上下文；只有接口不可用时才降级。</small>
 
@@ -32,6 +32,7 @@
 
                 <label for="story_rewriter_retrieval_chars">按需资料字符预算</label>
                 <input id="story_rewriter_retrieval_chars" class="text_pole" type="number" min="1000" max="50000" step="1000">
+                <small class="story-rewriter-setting-hint">完整模式只召回相关历史消息；角色事实和世界书不会绕过酒馆激活规则重复注入。</small>
 
                 <label for="story_rewriter_retrieval_results">按需资料最大条数</label>
                 <input id="story_rewriter_retrieval_results" class="text_pole" type="number" min="3" max="40" step="1">

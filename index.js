@@ -16,9 +16,11 @@ import {
     buildRevisionPrompt,
     compactSelectedText,
     composeRevisionFromDecisions,
+    constrainImpactPlan,
+    createActivatedWorldInfoChunks,
     createCharacterChunks,
     createChatChunks,
-    createWorldInfoChunks,
+    createConservativeImpactPlan,
     estimateTokenCount,
     getFocusParagraphIds,
     IMPACT_JSON_SCHEMA,
@@ -73,12 +75,22 @@ const state = {
 };
 
 let tavernRuntimePromise = null;
-let tavernReasoningRuntimePromise = null;
 
 function refreshContext() {
     const context = globalThis.SillyTavern?.getContext?.();
     if (context) state.context = context;
     return state.context;
+}
+
+function removeConfiguredReasoning(value) {
+    if (typeof value !== 'string') return value;
+    try {
+        const parsed = state.context?.parseReasoningFromString?.(value, { strict: false });
+        if (parsed && typeof parsed.content === 'string' && parsed.reasoning) return parsed.content;
+    } catch (error) {
+        console.warn('[Story Rewriter] public reasoning parser failed; using explicit-tag cleanup', error);
+    }
+    return value;
 }
 
 async function getTavernRuntime() {
@@ -90,17 +102,6 @@ async function getTavernRuntime() {
         });
     }
     return tavernRuntimePromise;
-}
-
-async function getTavernReasoningRuntime() {
-    if (!tavernReasoningRuntimePromise) {
-        const runtimeUrl = new URL('../../../../scripts/reasoning.js', import.meta.url);
-        tavernReasoningRuntimePromise = import(runtimeUrl.href).catch(error => {
-            console.warn('[Story Rewriter] unable to load SillyTavern reasoning parser', error);
-            return null;
-        });
-    }
-    return tavernReasoningRuntimePromise;
 }
 
 async function getActiveGenerationLimits() {
@@ -509,8 +510,8 @@ function updateContextSummary(panel) {
         : '';
     const responseLabel = responseLimit ? ` · 响应上限 ${formatTokenCount(responseLimit)}` : '';
     panel.querySelector('.story-rewriter-context-summary').textContent = (fullContext
-        ? '酒馆提示链 · 当前完整消息 · 本地按需故事资料'
-        : '当前完整消息 · 本地按需故事资料（完整提示链不可用时自动降级）') + limitLabel + responseLabel;
+        ? '酒馆当前生效上下文 · 当前完整消息 · 按需历史证据'
+        : '当前完整消息 · 当前角色事实 · 酒馆激活世界书快照 · 按需历史证据') + limitLabel + responseLabel;
     const timelineNotice = panel.querySelector('.story-rewriter-timeline-notice');
     timelineNotice.hidden = !fullContext || state.session.capture.messageId >= state.context.chat.length - 1;
 }
@@ -603,28 +604,35 @@ async function generatePreciseCandidate(panel) {
     try {
         await syncContextSummary(panel);
         const task = buildSessionTask(instruction, panel);
-        let response;
-        if (session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function') {
-            response = await state.context.generateQuietPrompt({
-                quietPrompt: buildFullContextRewritePrompt(task),
-                quietToLoud: false,
-                skipWIAN: false,
-                responseLength: state.settings.responseLength,
-                jsonSchema: REPLACEMENT_JSON_SCHEMA,
-                removeReasoning: true,
-                trimToSentence: false,
-            });
-        } else {
+        const requestReplacement = async useSchema => {
+            const fallbackContract = useSchema ? '' : '\n\n当前后端可能不支持 JSON Schema。只在 <story_rewriter_replacement_begin> 和 <story_rewriter_replacement_end> 之间输出替换正文，不要 JSON、解释或代码围栏。';
+            if (session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function') {
+                return state.context.generateQuietPrompt({
+                    quietPrompt: `${buildFullContextRewritePrompt(task)}${fallbackContract}`,
+                    quietToLoud: false,
+                    skipWIAN: false,
+                    responseLength: state.settings.responseLength,
+                    jsonSchema: useSchema ? REPLACEMENT_JSON_SCHEMA : null,
+                    removeReasoning: true,
+                    trimToSentence: false,
+                });
+            }
             if (typeof state.context.generateRaw !== 'function') throw new Error('当前 SillyTavern 不提供可用的后台生成接口。');
-            response = await state.context.generateRaw({
+            return state.context.generateRaw({
                 systemPrompt: DEFAULT_SYSTEM_PROMPT,
-                prompt: buildRewritePrompt(task),
+                prompt: `${buildRewritePrompt(task)}${fallbackContract}`,
                 responseLength: state.settings.responseLength,
-                jsonSchema: REPLACEMENT_JSON_SCHEMA,
+                jsonSchema: useSchema ? REPLACEMENT_JSON_SCHEMA : null,
                 trimNames: false,
             });
+        };
+        let response = await requestReplacement(true);
+        let candidate = cleanModelResponse(removeConfiguredReasoning(response));
+        if (!candidate) {
+            panel.querySelector('.story-rewriter-status').textContent = '当前模型未返回可用的结构化替换，正在切换纯文本协议…';
+            response = await requestReplacement(false);
+            candidate = cleanModelResponse(removeConfiguredReasoning(response));
         }
-        const candidate = cleanModelResponse(response);
         if (!candidate) throw new Error('模型返回了空内容。');
         if (state.session !== session || !panel.isConnected) return;
         session.candidate = candidate;
@@ -682,48 +690,41 @@ function getRepositoryCharacters() {
     return character ? [character] : [];
 }
 
-async function loadRepositoryWorldBooks(characters) {
-    const names = new Set();
-    for (const character of characters) {
-        const name = character?.data?.extensions?.world;
-        if (name) names.add(String(name));
+async function loadActivatedWorldInfoEvidence(maxContext) {
+    if (typeof state.context.getWorldInfoPrompt !== 'function') {
+        return { chunks: [], failures: ['当前版本未公开世界书激活接口'] };
     }
-    const chatWorld = state.context.chatMetadata?.world_info;
-    if (Array.isArray(chatWorld)) chatWorld.filter(Boolean).forEach(name => names.add(String(name)));
-    else if (chatWorld) names.add(String(chatWorld));
-
-    const books = [];
-    const failures = [];
-    for (const name of [...names].slice(0, 8)) {
-        try {
-            const data = await state.context.loadWorldInfo?.(name);
-            if (data) books.push({ name, data });
-            else failures.push(name);
-        } catch (error) {
-            console.warn(`[Story Rewriter] unable to load world info: ${name}`, error);
-            failures.push(name);
-        }
+    try {
+        const result = await state.context.getWorldInfoPrompt(
+            state.context.chat ?? [],
+            maxContext || Number(state.context.maxContext) || 65536,
+            true,
+        );
+        return { chunks: createActivatedWorldInfoChunks(result), failures: [] };
+    } catch (error) {
+        console.warn('[Story Rewriter] unable to build activated world-info snapshot', error);
+        return { chunks: [], failures: ['当前激活世界书快照'] };
     }
-    return { books, failures };
 }
 
 async function buildSemanticRepository(session, instruction, constraints) {
     refreshContext();
-    const characters = getRepositoryCharacters();
-    const { books, failures } = await loadRepositoryWorldBooks(characters);
-    const chunks = [
-        ...createCharacterChunks(characters),
-        ...createWorldInfoChunks(books),
-        ...createChatChunks(state.context.chat, session.capture.messageId),
-    ];
+    const limits = session.activeLimits ?? await getActiveGenerationLimits();
+    session.activeLimits = limits;
+    const chunks = [...createChatChunks(state.context.chat, session.capture.messageId)];
+    let failures = [];
+    if (session.contextMode === 'local') {
+        const characters = getRepositoryCharacters();
+        const activatedWorld = await loadActivatedWorldInfoEvidence(limits.maxContext);
+        chunks.push(...createCharacterChunks(characters), ...activatedWorld.chunks);
+        failures = activatedWorld.failures;
+    }
     const query = [
         instruction,
         session.capture.selectedText,
         constraints,
         ...session.requirements.slice(-3),
     ].filter(Boolean).join('\n');
-    const limits = session.activeLimits ?? await getActiveGenerationLimits();
-    session.activeLimits = limits;
     const originalTokens = await countTokens(session.capture.messageText);
     const desiredOutput = desiredRevisionTokens(originalTokens);
     const maxContext = limits.maxContext;
@@ -763,30 +764,32 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
                 quietToLoud: false,
                 skipWIAN: false,
                 responseLength,
-                jsonSchema: schema,
+                jsonSchema: attempt === 0 ? schema : null,
                 removeReasoning: true,
                 trimToSentence: false,
             });
         } else {
             if (typeof state.context.generateRaw !== 'function') throw new Error('当前 SillyTavern 不提供可用的后台生成接口。');
             response = await state.context.generateRaw({
-                systemPrompt: 'You are a source-grounded fiction editing agent. Follow the JSON schema and never reveal hidden reasoning.',
+                systemPrompt: attempt === 0
+                    ? 'You are a source-grounded fiction editing agent. Follow the JSON schema and never reveal hidden reasoning.'
+                    : 'You are a source-grounded fiction editing agent. Return one compact JSON object between the requested boundary markers and never reveal hidden reasoning.',
                 prompt: currentPrompt,
                 responseLength,
-                jsonSchema: schema,
+                jsonSchema: attempt === 0 ? schema : null,
                 trimNames: false,
             });
         }
         if (session.cancelled) throw new Error('已取消本次生成。');
         try {
-            return parser(response);
+            return parser(removeConfiguredReasoning(response));
         } catch (error) {
             lastError = error;
             if (attempt === 0) {
                 const truncationHint = stageLabel === '影响分析' && /unterminated|unexpected end|end of json|截断/i.test(String(error.message ?? error))
                     ? '上次输出疑似被截断。必须大幅压缩：不要复制原文，不要输出引句，每个理由只写一句，省略低置信度关联，确保 JSON 完整闭合。'
                     : '';
-                currentPrompt = `${prompt}\n\n<format_retry>上一次${stageLabel}未返回可解析的严格 JSON：${String(error.message ?? error)}。${truncationHint}重新执行原任务，只输出符合 Schema 的完整 JSON。</format_retry>`;
+                currentPrompt = `${prompt}\n\n<format_retry>上一次${stageLabel}没有返回可解析的数据：${String(error.message ?? error)}。${truncationHint}当前后端可能不支持 JSON Schema。重新执行原任务，在 <story_rewriter_json_begin> 与 <story_rewriter_json_end> 之间只放一个完整、紧凑的 JSON 对象，不要代码围栏或解释。</format_retry>`;
             }
         }
     }
@@ -821,15 +824,7 @@ async function generatePlain(prompt, responseLength, session) {
         });
     }
     if (session.cancelled) throw new Error('已取消本次生成。');
-    const raw = String(response ?? '');
-    try {
-        const reasoningRuntime = await getTavernReasoningRuntime();
-        const cleaned = reasoningRuntime?.removeReasoningFromString?.(raw);
-        if (typeof cleaned === 'string' && cleaned !== raw) return cleaned;
-    } catch (error) {
-        console.warn('[Story Rewriter] current reasoning parser failed; using explicit-tag cleanup', error);
-    }
-    return raw;
+    return String(removeConfiguredReasoning(String(response ?? '')) ?? '');
 }
 
 function getEffectiveImpactPlan(plan) {
@@ -866,6 +861,12 @@ function renderImpactPlan(panel) {
     summary.className = 'story-rewriter-impact-summary';
     summary.textContent = `目标：${plan.objective || '按本轮要求重构'}；强修改 ${plan.focusRegions.length} 段，关联 ${plan.linkedRegions.length} 段，衔接 ${plan.transitionRegions.length} 段。`;
     host.append(summary);
+    if (plan.fallback) {
+        const fallback = document.createElement('p');
+        fallback.className = 'story-rewriter-warning';
+        fallback.textContent = '模型的结构化分析不可用，当前采用本地保守范围。置信度不会决定替换权限，请在逐块确认中选择。';
+        host.append(fallback);
+    }
     if (session.repository?.budgetLimited) {
         const budget = document.createElement('p');
         budget.className = 'story-rewriter-warning';
@@ -894,7 +895,7 @@ function renderImpactPlan(panel) {
                 region.enabled = input.checked;
             });
             const text = document.createElement('span');
-            const confidence = typeof region.confidence === 'number' ? ` · ${Math.round(region.confidence * 100)}%` : '';
+            const confidence = typeof region.confidence === 'number' ? ` · 模型参考 ${Math.round(region.confidence * 100)}%` : '';
             text.textContent = `${region.paragraphId}${confidence} — ${region.reason}`;
             label.append(input, text);
             group.append(label);
@@ -941,7 +942,7 @@ function renderReferences(panel) {
     if (session.repository?.failures?.length) {
         const warning = document.createElement('p');
         warning.className = 'story-rewriter-warning';
-        warning.textContent = `未能单独读取世界书：${session.repository.failures.join('、')}。`;
+        warning.textContent = `本地降级资料未能读取：${session.repository.failures.join('、')}。`;
         host.append(warning);
     }
     const list = document.createElement('ul');
@@ -1247,11 +1248,11 @@ async function generateCompleteRevision(panel, instruction) {
         };
 
         let result = await runRevision(buildRevisionPrompt(revisionTask));
-        let coverage = assessRevisionCompleteness(session.capture.messageText, result.assembled, effectivePlan, instruction);
+        let coverage = assessRevisionCompleteness(session.capture.messageText, result.assembled, effectivePlan);
         if (result.complete && !coverage.complete) {
             panel.querySelector('.story-rewriter-status').textContent = '模型只返回了局部片段，正在重新请求完整消息…';
             result = await runRevision(buildRevisionCoverageRepairPrompt(revisionTask, coverage));
-            coverage = assessRevisionCompleteness(session.capture.messageText, result.assembled, effectivePlan, instruction);
+            coverage = assessRevisionCompleteness(session.capture.messageText, result.assembled, effectivePlan);
         }
         if (!result.assembled) throw new Error('模型没有返回可用的完整候选正文。');
         if (state.session !== session || !panel.isConnected || session.cancelled) return;
@@ -1308,7 +1309,7 @@ async function generateSemanticCandidate(panel) {
             sourceType: 'instruction',
             sourceLabel: '用户本轮修改要求',
             text: instruction,
-            authority: 'hard-rule',
+            authority: 'user-rule',
         }];
         if (constraints) {
             mandatoryReferences.push({
@@ -1316,7 +1317,7 @@ async function generateSemanticCandidate(panel) {
                 sourceType: 'instruction',
                 sourceLabel: '本次编辑持续约束',
                 text: constraints,
-                authority: 'hard-rule',
+                authority: 'user-rule',
             });
         }
         const task = {
@@ -1334,27 +1335,41 @@ async function generateSemanticCandidate(panel) {
         const promptTokens = await countTokens(impactPrompt);
         const maxContext = limits.maxContext;
         const availableAnalysisOutput = maxContext ? Math.floor(maxContext - promptTokens - 256) : state.settings.analysisResponseLength;
+        let rawPlan;
+        let fallbackReason = '';
         if (availableAnalysisOutput < 512) {
-            throw new Error(`影响分析请求约需 ${formatTokenCount(promptTokens + 256)}，当前预设上限为 ${formatTokenCount(maxContext)}。请降低资料预算或缩小编辑目标。`);
+            fallbackReason = `影响分析请求约需 ${formatTokenCount(promptTokens + 256)}，当前可用上下文不足。`;
+            rawPlan = createConservativeImpactPlan(paragraphs, focusIds, instruction, session.editMode);
+        } else {
+            try {
+                rawPlan = await generateStructured(
+                    impactPrompt,
+                    IMPACT_JSON_SCHEMA,
+                    Math.min(state.settings.analysisResponseLength, availableAnalysisOutput, limits.maxResponse || Number.POSITIVE_INFINITY),
+                    parseImpactResponse,
+                    session,
+                    '影响分析',
+                );
+            } catch (error) {
+                fallbackReason = String(error?.message ?? error);
+                console.warn('[Story Rewriter] structured impact analysis unavailable; using conservative local plan', error);
+                rawPlan = createConservativeImpactPlan(paragraphs, focusIds, instruction, session.editMode);
+            }
         }
-        const rawPlan = await generateStructured(
-            impactPrompt,
-            IMPACT_JSON_SCHEMA,
-            Math.min(state.settings.analysisResponseLength, availableAnalysisOutput, limits.maxResponse || Number.POSITIVE_INFINITY),
-            parseImpactResponse,
-            session,
-            '影响分析',
-        );
-        const plan = validateImpactPlan(rawPlan, paragraphs, focusIds, task.references.map(item => item.id));
+        let plan = validateImpactPlan(rawPlan, paragraphs, focusIds, task.references.map(item => item.id));
+        plan.fallback = Boolean(rawPlan.fallback);
+        plan.fallbackReason = fallbackReason;
         if (session.influence === 'strict') {
-            plan.linkedRegions = plan.linkedRegions.filter(region => region.confidence >= 0.85).slice(0, 4);
-            plan.transitionRegions = plan.transitionRegions.filter(region => region.confidence >= 0.75).slice(0, 2);
+            plan = constrainImpactPlan(plan, paragraphs, { maxLinked: 4, maxTransition: 2 });
         }
         session.impactPlan = plan;
         session.pendingTask = task;
         session.pendingInstruction = instruction;
         renderImpactPlan(panel);
         renderReferences(panel);
+        if (plan.fallback) {
+            panel.querySelector('.story-rewriter-status').textContent = `已使用本地保守范围继续生成；请在逐块确认中检查。${fallbackReason ? ` 原因：${fallbackReason}` : ''}`;
+        }
     } catch (error) {
         console.error('[Story Rewriter] impact analysis failed', error);
         panel.querySelector('.story-rewriter-status').textContent = `分析失败：${error.message ?? error}`;
