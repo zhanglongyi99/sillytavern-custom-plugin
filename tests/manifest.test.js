@@ -17,7 +17,7 @@ test('declares the standard SillyTavern frontend extension entry points', () => 
     assert.equal(manifest.minimum_client_version, '1.17.0');
 });
 
-test('publishes the reasoning-safe recovery release metadata', () => {
-    assert.equal(manifest.version, '0.6.2');
+test('publishes the local diagnostics release metadata', () => {
+    assert.equal(manifest.version, '0.6.3');
     assert.equal(manifest.display_name, '故事改写');
 });

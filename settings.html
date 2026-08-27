@@ -44,6 +44,20 @@
                 <input id="story_rewriter_generation_timeout" class="text_pole" type="number" min="30" max="900" step="30">
                 <small class="story-rewriter-setting-hint">默认 180 秒。单次分析或正文分段超过该时间后停止等待；已经收到的正文会保留为不完整候选。</small>
 
+                <hr>
+                <strong>本地诊断记录</strong>
+                <label class="checkbox_label" for="story_rewriter_diagnostics_enabled">
+                    <input id="story_rewriter_diagnostics_enabled" type="checkbox">
+                    <span>保存隐私安全的诊断记录</span>
+                </label>
+                <small class="story-rewriter-setting-hint">仅保存调用阶段、耗时、预算、字符数、解析结果和插件提示结构短哈希；不保存正文、提示词、世界书、推理或密钥。</small>
+                <small id="story_rewriter_diagnostics_count" class="story-rewriter-setting-hint">已保存 0 次生成记录（最多 30 次）。</small>
+                <div class="story-rewriter-diagnostics-actions">
+                    <button id="story_rewriter_diagnostics_export" type="button" class="menu_button">导出诊断记录</button>
+                    <button id="story_rewriter_diagnostics_clear" type="button" class="menu_button">清空诊断记录</button>
+                </div>
+                <small class="story-rewriter-setting-hint">供应商缓存 Token 不会通过酒馆后台生成接口返回；分析时请将导出文件与供应商使用量页面按时间对照。</small>
+
                 <label class="checkbox_label" for="story_rewriter_persistent_undo">
                     <input id="story_rewriter_persistent_undo" type="checkbox">
                     <span>保留旧版撤销记录</span>

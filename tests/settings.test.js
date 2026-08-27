@@ -16,6 +16,10 @@ test('declares the settings controls used by the runtime', () => {
         'story_rewriter_analysis_length',
         'story_rewriter_generation_timeout',
         'story_rewriter_persistent_undo',
+        'story_rewriter_diagnostics_enabled',
+        'story_rewriter_diagnostics_count',
+        'story_rewriter_diagnostics_export',
+        'story_rewriter_diagnostics_clear',
     ];
     for (const id of ids) assert.match(settings, new RegExp(`id=["']${id}["']`));
 });
@@ -23,4 +27,5 @@ test('declares the settings controls used by the runtime', () => {
 test('keeps advanced settings visually grouped', () => {
     assert.match(settings, /<details[^>]*story-rewriter-advanced-settings/);
     assert.match(settings, /上下文降级策略/);
+    assert.match(settings, /本地诊断记录/);
 });

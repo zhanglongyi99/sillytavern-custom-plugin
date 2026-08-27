@@ -38,11 +38,20 @@ test('reads impact rendering state from the active session', () => {
 });
 
 test('migrates the old impact-analysis budget to a non-truncating default', () => {
-    assert.match(runtime, /settingsVersion: 7/);
+    assert.match(runtime, /settingsVersion: 8/);
     assert.match(runtime, /analysisResponseLength: 4096/);
     assert.match(runtime, /unterminated\|unexpected end\|end of json\|截断/);
     assert.match(runtime, /响应上限/);
     assert.match(runtime, /模型连续两次返回了不完整的影响分析数据/);
+});
+
+test('persists privacy-safe generation diagnostics without story content', () => {
+    assert.match(runtime, /DIAGNOSTICS_STORAGE_KEY/);
+    assert.match(runtime, /finishGenerationDiagnostics/);
+    assert.match(runtime, /pluginPromptFingerprint/);
+    assert.match(runtime, /retrieval_ready/);
+    assert.match(runtime, /coverageRatio/);
+    assert.match(runtime, /story-rewriter-diagnostics/);
 });
 
 test('continues long plain-text revisions instead of wrapping the article in JSON', () => {

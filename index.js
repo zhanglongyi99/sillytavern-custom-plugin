@@ -35,6 +35,14 @@ import {
 } from './lib/semantic.js';
 import { appendRevisionSwipe } from './lib/swipe.js';
 import {
+    addDiagnosticRun,
+    appendDiagnosticEvent,
+    createDiagnosticArchive,
+    exportDiagnosticArchive,
+    finishDiagnosticRun,
+    normalizeDiagnosticArchive,
+} from './lib/diagnostics.js';
+import {
     GenerationCancelledError,
     isGenerationCancelled,
     isGenerationTimeout,
@@ -43,6 +51,8 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
+const EXTENSION_VERSION = '0.6.3';
+const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
 const MAX_REVISION_SEGMENTS = 8;
@@ -50,7 +60,7 @@ const CONTEXT_MODES = new Set(['tavern', 'local']);
 const EDIT_MODES = new Set(['semantic', 'full']);
 const SCOPE_MODES = new Set(['selection', 'smart']);
 const DEFAULT_SETTINGS = Object.freeze({
-    settingsVersion: 7,
+    settingsVersion: 8,
     enabled: true,
     contextMode: 'tavern',
     contextCharacters: 2000,
@@ -63,6 +73,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     retrievalResults: 18,
     analysisResponseLength: 4096,
     generationTimeoutSeconds: 180,
+    diagnosticsEnabled: true,
 });
 
 const state = {
@@ -83,6 +94,7 @@ const state = {
 };
 
 let tavernRuntimePromise = null;
+let diagnosticsStorageWarningShown = false;
 
 function refreshContext() {
     const context = globalThis.SillyTavern?.getContext?.();
@@ -162,21 +174,111 @@ function notify(message, type = 'info') {
     else console[type === 'error' ? 'error' : 'log'](`[Story Rewriter] ${message}`);
 }
 
-function generationLog(event, metadata = {}) {
+function diagnosticNow() {
+    return new Date().toISOString();
+}
+
+function createDiagnosticRunId() {
+    try {
+        if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
+    } catch {
+        // Fall through to a non-content timestamp identifier.
+    }
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function warnDiagnosticsStorage(error) {
+    if (diagnosticsStorageWarningShown) return;
+    diagnosticsStorageWarningShown = true;
+    console.warn('[Story Rewriter][diagnostics] local storage unavailable; generation will continue without persistent logs', error);
+}
+
+function readDiagnosticStorage() {
+    try {
+        if (!globalThis.localStorage) throw new Error('localStorage is unavailable');
+        const raw = globalThis.localStorage.getItem(DIAGNOSTICS_STORAGE_KEY);
+        return raw ? normalizeDiagnosticArchive(JSON.parse(raw)) : createDiagnosticArchive();
+    } catch (error) {
+        warnDiagnosticsStorage(error);
+        return createDiagnosticArchive();
+    }
+}
+
+function updateDiagnosticCount() {
+    const target = document.querySelector?.('#story_rewriter_diagnostics_count');
+    if (!target) return;
+    const count = readDiagnosticStorage().runs.length;
+    target.textContent = `已保存 ${count} 次生成记录（最多 30 次）。`;
+}
+
+function writeDiagnosticStorage(archive) {
+    try {
+        if (!globalThis.localStorage) throw new Error('localStorage is unavailable');
+        globalThis.localStorage.setItem(DIAGNOSTICS_STORAGE_KEY, JSON.stringify(normalizeDiagnosticArchive(archive)));
+        updateDiagnosticCount();
+        return true;
+    } catch (error) {
+        warnDiagnosticsStorage(error);
+        return false;
+    }
+}
+
+function beginDiagnosticRun(session) {
+    if (session.diagnosticRunId) finishGenerationDiagnostics(session, 'superseded');
+    session.diagnosticRunId = null;
+    if (!state.settings.diagnosticsEnabled) return;
+    const id = createDiagnosticRunId();
+    const archive = addDiagnosticRun(readDiagnosticStorage(), {
+        id,
+        startedAt: diagnosticNow(),
+        extensionVersion: EXTENSION_VERSION,
+        editMode: session.editMode,
+        scopeMode: session.scopeMode,
+        contextMode: session.contextMode,
+    });
+    if (writeDiagnosticStorage(archive)) session.diagnosticRunId = id;
+}
+
+function finishGenerationDiagnostics(session, status) {
+    if (!session?.diagnosticRunId) return;
+    generationLog('session_end', { outcome: status }, session);
+    const archive = finishDiagnosticRun(
+        readDiagnosticStorage(),
+        session.diagnosticRunId,
+        status,
+        diagnosticNow(),
+    );
+    writeDiagnosticStorage(archive);
+    session.diagnosticRunId = null;
+}
+
+function generationLog(event, metadata = {}, session = state.session) {
     const allowed = [
         'stage', 'segment', 'attempt', 'responseLength', 'promptTokens',
         'elapsedMs', 'responseCharacters', 'providerCharacters', 'usableCharacters',
-        'complete', 'errorCode', 'stopReason', 'parseOutcome',
+        'pluginPromptCharacters', 'pluginPromptFingerprint', 'complete',
+        'errorCode', 'stopReason', 'parseOutcome', 'coverageRatio',
+        'retrievalItems', 'retrievalCharacters', 'contextLimit', 'responseLimit',
+        'limitSource', 'outcome',
     ];
     const safe = Object.fromEntries(allowed
         .filter(key => metadata[key] !== undefined)
         .map(key => [key, metadata[key]]));
     const method = event === 'error' || event === 'timeout' ? 'warn' : 'info';
     console[method](`[Story Rewriter][generation] ${event}`, safe);
-    const session = state.session;
     if (session?.generationDiagnostics) {
         session.generationDiagnostics.push({ event, ...safe, createdAt: new Date().toISOString() });
         if (session.generationDiagnostics.length > 80) session.generationDiagnostics.shift();
+    }
+    if (session?.diagnosticRunId && state.settings.diagnosticsEnabled) {
+        const archive = appendDiagnosticEvent(
+            readDiagnosticStorage(),
+            session.diagnosticRunId,
+            event,
+            safe,
+            diagnosticNow(),
+        );
+        writeDiagnosticStorage(archive);
     }
 }
 
@@ -191,6 +293,8 @@ function startGenerationSession(session) {
     session.activeRevisionStage = '';
     session.coverageRepairReason = '';
     session.generationDiagnostics = [];
+    beginDiagnosticRun(session);
+    generationLog('session_start', {}, session);
 }
 
 function cancelGenerationSession(session, message = '已取消本次生成。') {
@@ -212,7 +316,7 @@ async function runGenerationCall(session, stage, operation, metadata = {}) {
         timeoutMs: state.settings.generationTimeoutSeconds * 1000,
         signal: session.generationController?.signal,
         onTimeout: () => state.context?.stopGeneration?.(),
-        logger: generationLog,
+        logger: (event, metadata) => generationLog(event, metadata, session),
         metadata: { ...metadata, stage },
     });
 }
@@ -222,6 +326,33 @@ function clampNumber(value, minimum, maximum, fallback) {
     return Number.isFinite(number) ? Math.min(maximum, Math.max(minimum, number)) : fallback;
 }
 
+function downloadDiagnosticLog() {
+    const payload = exportDiagnosticArchive(readDiagnosticStorage(), diagnosticNow());
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    const timestamp = diagnosticNow().replace(/[:.]/g, '-');
+    anchor.href = url;
+    anchor.download = `story-rewriter-diagnostics-${timestamp}.json`;
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+    notify(`已导出 ${payload.runs.length} 次生成的诊断记录。`, 'success');
+}
+
+function clearDiagnosticLog() {
+    if (!(globalThis.confirm?.('确认清空本浏览器中保存的故事改写诊断记录吗？此操作无法撤销。') ?? false)) return;
+    try {
+        globalThis.localStorage?.removeItem(DIAGNOSTICS_STORAGE_KEY);
+        updateDiagnosticCount();
+        notify('诊断记录已清空。', 'success');
+    } catch (error) {
+        warnDiagnosticsStorage(error);
+        notify('无法清空诊断记录，请检查浏览器存储权限。', 'error');
+    }
+}
+
 function loadSettings() {
     const stored = state.context.extensionSettings?.[EXTENSION_KEY] ?? {};
     const storedVersion = Number(stored.settingsVersion ?? 0);
@@ -229,12 +360,13 @@ function loadSettings() {
     const upgradingToV5 = storedVersion < 5;
     const upgradingToV6 = storedVersion < 6;
     const upgradingToV7 = storedVersion < 7;
+    const upgradingToV8 = storedVersion < 8;
     const storedAnalysisLength = Number(stored.analysisResponseLength);
     const storedFullResponseLength = Number(stored.fullResponseLength);
     state.settings = {
         ...DEFAULT_SETTINGS,
         ...stored,
-        settingsVersion: 7,
+        settingsVersion: 8,
         enabled: stored.enabled ?? DEFAULT_SETTINGS.enabled,
         contextMode: upgradingToV4
             ? DEFAULT_SETTINGS.contextMode
@@ -253,9 +385,10 @@ function loadSettings() {
             ? DEFAULT_SETTINGS.analysisResponseLength
             : clampNumber(storedAnalysisLength, 512, 4096, DEFAULT_SETTINGS.analysisResponseLength),
         generationTimeoutSeconds: clampNumber(stored.generationTimeoutSeconds, 30, 900, DEFAULT_SETTINGS.generationTimeoutSeconds),
+        diagnosticsEnabled: stored.diagnosticsEnabled ?? DEFAULT_SETTINGS.diagnosticsEnabled,
     };
     state.context.extensionSettings[EXTENSION_KEY] = state.settings;
-    if (upgradingToV4 || upgradingToV5 || upgradingToV6 || upgradingToV7) state.context.saveSettingsDebounced();
+    if (upgradingToV4 || upgradingToV5 || upgradingToV6 || upgradingToV7 || upgradingToV8) state.context.saveSettingsDebounced();
 }
 
 function saveSettings() {
@@ -281,6 +414,9 @@ async function mountSettings() {
     const retrievalResults = document.querySelector('#story_rewriter_retrieval_results');
     const analysisResponseLength = document.querySelector('#story_rewriter_analysis_length');
     const generationTimeoutSeconds = document.querySelector('#story_rewriter_generation_timeout');
+    const diagnosticsEnabled = document.querySelector('#story_rewriter_diagnostics_enabled');
+    const diagnosticsExport = document.querySelector('#story_rewriter_diagnostics_export');
+    const diagnosticsClear = document.querySelector('#story_rewriter_diagnostics_clear');
     enabled.checked = state.settings.enabled;
     contextMode.value = state.settings.contextMode;
     contextCharacters.value = String(state.settings.contextCharacters);
@@ -291,6 +427,8 @@ async function mountSettings() {
     retrievalResults.value = String(state.settings.retrievalResults);
     analysisResponseLength.value = String(state.settings.analysisResponseLength);
     generationTimeoutSeconds.value = String(state.settings.generationTimeoutSeconds);
+    diagnosticsEnabled.checked = state.settings.diagnosticsEnabled;
+    updateDiagnosticCount();
 
     enabled.addEventListener('change', () => {
         state.settings.enabled = enabled.checked;
@@ -342,6 +480,12 @@ async function mountSettings() {
         generationTimeoutSeconds.value = String(state.settings.generationTimeoutSeconds);
         saveSettings();
     });
+    diagnosticsEnabled.addEventListener('change', () => {
+        state.settings.diagnosticsEnabled = diagnosticsEnabled.checked;
+        saveSettings();
+    });
+    diagnosticsExport.addEventListener('click', downloadDiagnosticLog);
+    diagnosticsClear.addEventListener('click', clearDiagnosticLog);
 }
 
 function createActionButton() {
@@ -595,6 +739,12 @@ async function syncContextSummary(panel) {
     if (state.session !== session || !panel.isConnected) return limits;
     session.activeLimits = limits;
     updateContextSummary(panel);
+    generationLog('context_limits', {
+        stage: '上下文配置',
+        contextLimit: limits.maxContext,
+        responseLimit: limits.maxResponse,
+        limitSource: limits.source,
+    }, session);
     return limits;
 }
 
@@ -676,20 +826,25 @@ async function generatePreciseCandidate(panel) {
         return;
     }
 
-    startGenerationSession(session);
     const fellBack = applyAutomaticContextFallback(panel);
+    startGenerationSession(session);
     setWorkspaceBusy(panel, true, session.contextMode === 'tavern'
         ? '正在通过酒馆完整上下文调用当前模型…'
         : fellBack ? '完整上下文接口不可用，已降级到插件资料模式…' : '正在通过插件资料模式调用当前模型…', { cancelable: true });
+    let diagnosticStatus = 'failed';
     try {
         await syncContextSummary(panel);
         const task = buildSessionTask(instruction, panel);
         const requestReplacement = async useSchema => {
             const fallbackContract = useSchema ? '' : '\n\n当前后端可能不支持 JSON Schema。只在 <story_rewriter_replacement_begin> 和 <story_rewriter_replacement_end> 之间输出替换正文，不要 JSON、解释或代码围栏。';
+            const pluginPrompt = session.contextMode === 'tavern'
+                ? `${buildFullContextRewritePrompt(task)}${fallbackContract}`
+                : `${buildRewritePrompt(task)}${fallbackContract}`;
+            const promptTokens = await countTokens(pluginPrompt);
             return runGenerationCall(session, '局部替换', () => {
                 if (session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function') {
                     return state.context.generateQuietPrompt({
-                        quietPrompt: `${buildFullContextRewritePrompt(task)}${fallbackContract}`,
+                        quietPrompt: pluginPrompt,
                         quietToLoud: false,
                         skipWIAN: false,
                         responseLength: state.settings.responseLength,
@@ -701,7 +856,7 @@ async function generatePreciseCandidate(panel) {
                 if (typeof state.context.generateRaw !== 'function') throw new Error('当前 SillyTavern 不提供可用的后台生成接口。');
                 return state.context.generateRaw({
                     systemPrompt: DEFAULT_SYSTEM_PROMPT,
-                    prompt: `${buildRewritePrompt(task)}${fallbackContract}`,
+                    prompt: pluginPrompt,
                     responseLength: state.settings.responseLength,
                     jsonSchema: useSchema ? REPLACEMENT_JSON_SCHEMA : null,
                     trimNames: false,
@@ -709,6 +864,9 @@ async function generatePreciseCandidate(panel) {
             }, {
                 attempt: useSchema ? 1 : 2,
                 responseLength: state.settings.responseLength,
+                promptTokens,
+                pluginPromptCharacters: pluginPrompt.length,
+                pluginPromptFingerprint: hashText(pluginPrompt),
             });
         };
         let response = await requestReplacement(true);
@@ -721,7 +879,10 @@ async function generatePreciseCandidate(panel) {
             candidate = cleanModelResponse(removeConfiguredReasoning(response));
         }
         if (!candidate) throw new Error('模型返回了空内容。');
-        if (state.session !== session || !panel.isConnected) return;
+        if (state.session !== session || !panel.isConnected) {
+            diagnosticStatus = 'superseded';
+            return;
+        }
         session.candidate = candidate;
         session.constraints = task.constraints;
         session.requirements.push(instruction);
@@ -734,12 +895,17 @@ async function generatePreciseCandidate(panel) {
         instructionInput.value = '';
         renderSessionTurns(panel);
         panel.querySelector('.story-rewriter-status').textContent = '新版本已生成。可以继续提出要求或应用为新版本。';
+        diagnosticStatus = 'completed';
     } catch (error) {
         console.error('[Story Rewriter] generation failed', error);
+        diagnosticStatus = isGenerationCancelled(error)
+            ? 'cancelled'
+            : isGenerationTimeout(error) ? 'timeout' : 'failed';
         panel.querySelector('.story-rewriter-status').textContent = isGenerationCancelled(error)
             ? '已取消本次生成。'
             : `生成失败：${error.message ?? error}`;
     } finally {
+        finishGenerationDiagnostics(session, diagnosticStatus);
         session.generationInProgress = false;
         if (panel.isConnected && state.panel === panel) {
             setWorkspaceBusy(panel, false, panel.querySelector('.story-rewriter-status').textContent);
@@ -847,6 +1013,7 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
     let lastError;
     for (let attempt = 0; attempt < 2; attempt++) {
         if (session.cancelled) throw new GenerationCancelledError();
+        const promptTokens = await countTokens(currentPrompt);
         const response = await runGenerationCall(session, stageLabel, () => {
             if (session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function') {
                 return state.context.generateQuietPrompt({
@@ -869,7 +1036,13 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
                 jsonSchema: attempt === 0 ? schema : null,
                 trimNames: false,
             });
-        }, { attempt: attempt + 1, responseLength });
+        }, {
+            attempt: attempt + 1,
+            responseLength,
+            promptTokens,
+            pluginPromptCharacters: currentPrompt.length,
+            pluginPromptFingerprint: hashText(currentPrompt),
+        });
         if (session.cancelled) throw new GenerationCancelledError();
         try {
             return parser(removeConfiguredReasoning(response));
@@ -913,7 +1086,12 @@ async function generatePlain(prompt, responseLength, session, metadata = {}) {
             responseLength,
             trimNames: false,
         });
-    }, { ...diagnostics, responseLength });
+    }, {
+        ...diagnostics,
+        responseLength,
+        pluginPromptCharacters: prompt.length,
+        pluginPromptFingerprint: hashText(prompt),
+    });
     if (session.cancelled) throw new GenerationCancelledError();
     return String(response ?? '');
 }
@@ -1274,7 +1452,7 @@ function savePartialCheckpoint(session, candidate, segments, metadata = {}) {
         ...metadata,
         segment: segments,
         responseCharacters: text.length,
-    });
+    }, session);
 }
 
 function describePartialRecovery(error, session) {
@@ -1294,6 +1472,7 @@ async function generateCompleteRevision(panel, instruction) {
     const task = session.pendingTask;
     const effectivePlan = getEffectiveImpactPlan(session.impactPlan);
     setWorkspaceBusy(panel, true, '正在生成完整候选稿…', { cancelable: true });
+    let diagnosticStatus = 'failed';
     try {
         const limits = session.activeLimits ?? await getActiveGenerationLimits();
         session.activeLimits = limits;
@@ -1352,7 +1531,7 @@ async function generateCompleteRevision(panel, instruction) {
                         usableCharacters: parsed.text.length,
                         complete: parsed.complete,
                         parseOutcome: parsed.parseOutcome,
-                    });
+                    }, session);
                     if (parsed.text || (parsed.complete && assembled)) break;
                     console.warn('[Story Rewriter] model returned no usable revision text', {
                         stage: stageLabel,
@@ -1397,12 +1576,18 @@ async function generateCompleteRevision(panel, instruction) {
                 responseCharacters: assembled.length,
                 complete,
                 stopReason,
-            });
+            }, session);
             return { assembled, complete, segments, stopReason };
         };
 
         let result = await runRevision(buildRevisionPrompt(revisionTask), '初稿');
         let coverage = assessRevisionCompleteness(session.capture.messageText, result.assembled, effectivePlan);
+        generationLog('coverage', {
+            stage: '初稿',
+            coverageRatio: coverage.lengthRatio,
+            complete: coverage.complete,
+            usableCharacters: coverage.candidateCharacters,
+        }, session);
         if (result.complete && !coverage.complete) {
             const initialResult = result;
             const initialCoverage = coverage;
@@ -1410,6 +1595,12 @@ async function generateCompleteRevision(panel, instruction) {
             panel.querySelector('.story-rewriter-status').textContent = `${session.coverageRepairReason}，正在进行完整性修复…`;
             const repaired = await runRevision(buildRevisionCoverageRepairPrompt(revisionTask, coverage), '完整性修复');
             const repairedCoverage = assessRevisionCompleteness(session.capture.messageText, repaired.assembled, effectivePlan);
+            generationLog('coverage', {
+                stage: '完整性修复',
+                coverageRatio: repairedCoverage.lengthRatio,
+                complete: repairedCoverage.complete,
+                usableCharacters: repairedCoverage.candidateCharacters,
+            }, session);
             if (repairedCoverage.complete || repairedCoverage.candidateCharacters >= initialCoverage.candidateCharacters) {
                 result = repaired;
                 coverage = repairedCoverage;
@@ -1423,7 +1614,10 @@ async function generateCompleteRevision(panel, instruction) {
             }
         }
         if (!result.assembled) throw new Error('模型没有返回可用的完整候选正文。');
-        if (state.session !== session || !panel.isConnected) return;
+        if (state.session !== session || !panel.isConnected) {
+            diagnosticStatus = 'superseded';
+            return;
+        }
         if (session.cancelled) throw new GenerationCancelledError();
         session.generationIncomplete = !result.complete || !coverage.complete;
         session.generationIncompleteReason = !result.complete
@@ -1439,8 +1633,12 @@ async function generateCompleteRevision(panel, instruction) {
         showCandidate(panel, result.assembled, instruction);
         session.pendingTask = null;
         session.pendingInstruction = '';
+        diagnosticStatus = session.generationIncomplete ? 'incomplete' : 'completed';
     } catch (error) {
         console.error('[Story Rewriter] complete revision failed', error);
+        diagnosticStatus = isGenerationCancelled(error)
+            ? 'cancelled'
+            : isGenerationTimeout(error) ? 'timeout' : 'failed';
         const partial = String(session.partialCandidate ?? '').trim();
         if (partial && state.session === session && panel.isConnected) {
             session.generationIncomplete = true;
@@ -1449,12 +1647,16 @@ async function generateCompleteRevision(panel, instruction) {
             showCandidate(panel, partial, instruction);
             session.pendingTask = null;
             session.pendingInstruction = '';
+            diagnosticStatus = isGenerationCancelled(error)
+                ? 'partial_cancelled'
+                : isGenerationTimeout(error) ? 'partial_timeout' : 'partial_failed';
         } else if (panel.isConnected) {
             panel.querySelector('.story-rewriter-status').textContent = isGenerationCancelled(error)
                 ? '已取消本次生成；取消前尚未收到可保留的正文。'
                 : `生成失败：${error.message ?? error}`;
         }
     } finally {
+        finishGenerationDiagnostics(session, diagnosticStatus);
         session.generationInProgress = false;
         if (panel.isConnected && state.panel === panel) {
             setWorkspaceBusy(panel, false, panel.querySelector('.story-rewriter-status').textContent);
@@ -1474,10 +1676,10 @@ async function generateSemanticCandidate(panel) {
         panel.querySelector('.story-rewriter-status').textContent = '原消息、聊天或 Swipe 已变化，请重新打开工作台。';
         return;
     }
-    startGenerationSession(session);
     session.influence = session.scopeMode === 'selection' ? 'strict' : 'semantic';
     const constraints = panel.querySelector('.story-rewriter-constraints').value.trim();
     const fellBack = applyAutomaticContextFallback(panel);
+    startGenerationSession(session);
     setWorkspaceBusy(panel, true, fellBack ? '完整上下文接口不可用，已降级并建立故事资料视图…' : '正在建立故事资料视图…', { cancelable: true });
     try {
         const limits = await syncContextSummary(panel);
@@ -1489,6 +1691,11 @@ async function generateSemanticCandidate(panel) {
         const repository = await buildSemanticRepository(session, instruction, constraints);
         if (session.cancelled) throw new GenerationCancelledError();
         session.repository = repository;
+        generationLog('retrieval_ready', {
+            stage: '资料检索',
+            retrievalItems: repository.retrieval.items.length,
+            retrievalCharacters: repository.retrieval.characters,
+        }, session);
         panel.querySelector('.story-rewriter-status').textContent = `找到 ${repository.retrieval.items.length} 条相关资料，正在识别影响范围…`;
         const mandatoryReferences = [{
             id: 'user-current-instruction',
@@ -1559,6 +1766,9 @@ async function generateSemanticCandidate(panel) {
         }
     } catch (error) {
         console.error('[Story Rewriter] impact analysis failed', error);
+        finishGenerationDiagnostics(session, isGenerationCancelled(error)
+            ? 'cancelled'
+            : isGenerationTimeout(error) ? 'timeout' : 'analysis_failed');
         session.generationInProgress = false;
         panel.querySelector('.story-rewriter-status').textContent = isGenerationCancelled(error)
             ? '已取消本次生成。'
@@ -1859,6 +2069,7 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
         activeRevisionStage: '',
         coverageRepairReason: '',
         generationDiagnostics: [],
+        diagnosticRunId: null,
     };
 
     const semantic = true;
