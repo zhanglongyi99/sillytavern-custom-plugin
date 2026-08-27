@@ -40,6 +40,10 @@
                 <label for="story_rewriter_analysis_length">影响分析最大 Token 数</label>
                 <input id="story_rewriter_analysis_length" class="text_pole" type="number" min="512" max="4096" step="128">
 
+                <label for="story_rewriter_generation_timeout">单次模型调用超时（秒）</label>
+                <input id="story_rewriter_generation_timeout" class="text_pole" type="number" min="30" max="900" step="30">
+                <small class="story-rewriter-setting-hint">默认 180 秒。单次分析或正文分段超过该时间后停止等待；已经收到的正文会保留为不完整候选。</small>
+
                 <label class="checkbox_label" for="story_rewriter_persistent_undo">
                     <input id="story_rewriter_persistent_undo" type="checkbox">
                     <span>保留旧版撤销记录</span>

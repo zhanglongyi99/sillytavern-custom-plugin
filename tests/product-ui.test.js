@@ -38,7 +38,7 @@ test('reads impact rendering state from the active session', () => {
 });
 
 test('migrates the old impact-analysis budget to a non-truncating default', () => {
-    assert.match(runtime, /settingsVersion: 6/);
+    assert.match(runtime, /settingsVersion: 7/);
     assert.match(runtime, /analysisResponseLength: 4096/);
     assert.match(runtime, /unterminated\|unexpected end\|end of json\|截断/);
     assert.match(runtime, /响应上限/);
@@ -51,7 +51,7 @@ test('continues long plain-text revisions instead of wrapping the article in JSO
     assert.match(runtime, /buildRevisionContinuationPrompt/);
     assert.match(runtime, /parseRevisionTextSegment/);
     assert.match(runtime, /mergeRevisionContinuation/);
-    assert.match(runtime, /正文达到单次响应上限，正在自动续接/);
+    assert.match(runtime, /未返回正文结束标记，正在请求/);
     assert.match(runtime, /removeReasoning: false/);
     assert.match(runtime, /parseReasoningFromString/);
     assert.doesNotMatch(runtime, /scripts\/reasoning\.js/);
@@ -60,6 +60,16 @@ test('continues long plain-text revisions instead of wrapping the article in JSO
     assert.match(runtime, /模型只返回了局部片段，正在重新请求完整消息/);
     assert.match(runtime, /session\.generationIncomplete && change\.kind === 'deleted'/);
     assert.doesNotMatch(runtime, /generateStructured\([\s\S]{0,160}REVISION_JSON_SCHEMA/);
+});
+
+test('bounds every model call and preserves partial long-form output', () => {
+    assert.match(runtime, /generationTimeoutSeconds: 180/);
+    assert.match(runtime, /runGenerationCall\(session, '局部替换'/);
+    assert.match(runtime, /runGenerationCall\(session, stageLabel/);
+    assert.match(runtime, /runGenerationCall\(session, '完整正文'/);
+    assert.match(runtime, /session\.partialCandidate/);
+    assert.match(runtime, /已保留超时前收到的正文/);
+    assert.doesNotMatch(runtime, /正文达到单次响应上限，正在自动续接/);
 });
 
 test('keeps Tavern context authoritative and degrades by capability', () => {

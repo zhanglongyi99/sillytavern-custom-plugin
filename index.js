@@ -33,6 +33,12 @@ import {
     validateImpactPlan,
 } from './lib/semantic.js';
 import { appendRevisionSwipe } from './lib/swipe.js';
+import {
+    GenerationCancelledError,
+    isGenerationCancelled,
+    isGenerationTimeout,
+    runGuardedGeneration,
+} from './lib/generation.js';
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
@@ -43,7 +49,7 @@ const CONTEXT_MODES = new Set(['tavern', 'local']);
 const EDIT_MODES = new Set(['semantic', 'full']);
 const SCOPE_MODES = new Set(['selection', 'smart']);
 const DEFAULT_SETTINGS = Object.freeze({
-    settingsVersion: 6,
+    settingsVersion: 7,
     enabled: true,
     contextMode: 'tavern',
     contextCharacters: 2000,
@@ -55,6 +61,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     retrievalCharacters: 12000,
     retrievalResults: 18,
     analysisResponseLength: 4096,
+    generationTimeoutSeconds: 180,
 });
 
 const state = {
@@ -154,6 +161,57 @@ function notify(message, type = 'info') {
     else console[type === 'error' ? 'error' : 'log'](`[Story Rewriter] ${message}`);
 }
 
+function generationLog(event, metadata = {}) {
+    const allowed = [
+        'stage', 'segment', 'attempt', 'responseLength', 'promptTokens',
+        'elapsedMs', 'responseCharacters', 'complete', 'errorCode', 'stopReason',
+    ];
+    const safe = Object.fromEntries(allowed
+        .filter(key => metadata[key] !== undefined)
+        .map(key => [key, metadata[key]]));
+    const method = event === 'error' || event === 'timeout' ? 'warn' : 'info';
+    console[method](`[Story Rewriter][generation] ${event}`, safe);
+    const session = state.session;
+    if (session?.generationDiagnostics) {
+        session.generationDiagnostics.push({ event, ...safe, createdAt: new Date().toISOString() });
+        if (session.generationDiagnostics.length > 80) session.generationDiagnostics.shift();
+    }
+}
+
+function startGenerationSession(session) {
+    session.generationController?.abort(new GenerationCancelledError('新的生成已开始。'));
+    session.cancelled = false;
+    session.generationInProgress = true;
+    session.generationController = new AbortController();
+    session.partialCandidate = '';
+    session.partialSegments = 0;
+    session.generationDiagnostics = [];
+}
+
+function cancelGenerationSession(session, message = '已取消本次生成。') {
+    if (!session) return;
+    session.cancelled = true;
+    const error = new GenerationCancelledError(message);
+    if (!session.generationController?.signal.aborted) session.generationController?.abort(error);
+    try {
+        state.context?.stopGeneration?.();
+    } catch (stopError) {
+        console.warn('[Story Rewriter][generation] unable to stop host generation', stopError);
+    }
+}
+
+async function runGenerationCall(session, stage, operation, metadata = {}) {
+    if (session.cancelled) throw new GenerationCancelledError();
+    return runGuardedGeneration({
+        operation,
+        timeoutMs: state.settings.generationTimeoutSeconds * 1000,
+        signal: session.generationController?.signal,
+        onTimeout: () => state.context?.stopGeneration?.(),
+        logger: generationLog,
+        metadata: { ...metadata, stage },
+    });
+}
+
 function clampNumber(value, minimum, maximum, fallback) {
     const number = Number(value);
     return Number.isFinite(number) ? Math.min(maximum, Math.max(minimum, number)) : fallback;
@@ -165,12 +223,13 @@ function loadSettings() {
     const upgradingToV4 = storedVersion < 4;
     const upgradingToV5 = storedVersion < 5;
     const upgradingToV6 = storedVersion < 6;
+    const upgradingToV7 = storedVersion < 7;
     const storedAnalysisLength = Number(stored.analysisResponseLength);
     const storedFullResponseLength = Number(stored.fullResponseLength);
     state.settings = {
         ...DEFAULT_SETTINGS,
         ...stored,
-        settingsVersion: 6,
+        settingsVersion: 7,
         enabled: stored.enabled ?? DEFAULT_SETTINGS.enabled,
         contextMode: upgradingToV4
             ? DEFAULT_SETTINGS.contextMode
@@ -188,9 +247,10 @@ function loadSettings() {
         analysisResponseLength: upgradingToV5 && (!Number.isFinite(storedAnalysisLength) || storedAnalysisLength <= 1400)
             ? DEFAULT_SETTINGS.analysisResponseLength
             : clampNumber(storedAnalysisLength, 512, 4096, DEFAULT_SETTINGS.analysisResponseLength),
+        generationTimeoutSeconds: clampNumber(stored.generationTimeoutSeconds, 30, 900, DEFAULT_SETTINGS.generationTimeoutSeconds),
     };
     state.context.extensionSettings[EXTENSION_KEY] = state.settings;
-    if (upgradingToV4 || upgradingToV5 || upgradingToV6) state.context.saveSettingsDebounced();
+    if (upgradingToV4 || upgradingToV5 || upgradingToV6 || upgradingToV7) state.context.saveSettingsDebounced();
 }
 
 function saveSettings() {
@@ -215,6 +275,7 @@ async function mountSettings() {
     const retrievalCharacters = document.querySelector('#story_rewriter_retrieval_chars');
     const retrievalResults = document.querySelector('#story_rewriter_retrieval_results');
     const analysisResponseLength = document.querySelector('#story_rewriter_analysis_length');
+    const generationTimeoutSeconds = document.querySelector('#story_rewriter_generation_timeout');
     enabled.checked = state.settings.enabled;
     contextMode.value = state.settings.contextMode;
     contextCharacters.value = String(state.settings.contextCharacters);
@@ -224,6 +285,7 @@ async function mountSettings() {
     retrievalCharacters.value = String(state.settings.retrievalCharacters);
     retrievalResults.value = String(state.settings.retrievalResults);
     analysisResponseLength.value = String(state.settings.analysisResponseLength);
+    generationTimeoutSeconds.value = String(state.settings.generationTimeoutSeconds);
 
     enabled.addEventListener('change', () => {
         state.settings.enabled = enabled.checked;
@@ -268,6 +330,11 @@ async function mountSettings() {
     analysisResponseLength.addEventListener('change', () => {
         state.settings.analysisResponseLength = clampNumber(analysisResponseLength.value, 512, 4096, DEFAULT_SETTINGS.analysisResponseLength);
         analysisResponseLength.value = String(state.settings.analysisResponseLength);
+        saveSettings();
+    });
+    generationTimeoutSeconds.addEventListener('change', () => {
+        state.settings.generationTimeoutSeconds = clampNumber(generationTimeoutSeconds.value, 30, 900, DEFAULT_SETTINGS.generationTimeoutSeconds);
+        generationTimeoutSeconds.value = String(state.settings.generationTimeoutSeconds);
         saveSettings();
     });
 }
@@ -400,6 +467,7 @@ function onWindowBlur() {
 }
 
 function closeWorkspace() {
+    if (state.session?.generationInProgress) cancelGenerationSession(state.session, '工作台已关闭。');
     state.panelResizeCleanup?.();
     state.panelResizeCleanup = null;
     state.panel?.remove();
@@ -437,7 +505,7 @@ function enablePanelResize(panel) {
     });
 }
 
-function setWorkspaceBusy(panel, busy, status = '') {
+function setWorkspaceBusy(panel, busy, status = '', { cancelable = false } = {}) {
     panel.dataset.busy = String(busy);
     panel.querySelectorAll('button, select, input').forEach(element => {
         element.disabled = busy
@@ -453,7 +521,7 @@ function setWorkspaceBusy(panel, busy, status = '') {
         if (candidate && apply) apply.disabled = !candidate.value.trim();
         panel.querySelector('.story-rewriter-replace')?.toggleAttribute('disabled', !candidate?.value.trim());
     }
-    panel.querySelector('.story-rewriter-cancel')?.toggleAttribute('hidden', !busy);
+    panel.querySelector('.story-rewriter-cancel')?.toggleAttribute('hidden', !busy || !cancelable);
     panel.querySelector('.story-rewriter-status').textContent = status;
 }
 
@@ -550,6 +618,9 @@ function resetSessionForScopeChange(panel) {
     session.generationIncomplete = false;
     session.generationIncompleteReason = '';
     session.generationSegments = 0;
+    session.partialCandidate = '';
+    session.partialSegments = 0;
+    session.generationDiagnostics = [];
     panel.querySelector('.story-rewriter-candidate').value = '';
     panel.querySelector('.story-rewriter-preview').hidden = true;
     panel.querySelector('.story-rewriter-impact').hidden = true;
@@ -597,40 +668,48 @@ async function generatePreciseCandidate(panel) {
         return;
     }
 
+    startGenerationSession(session);
     const fellBack = applyAutomaticContextFallback(panel);
     setWorkspaceBusy(panel, true, session.contextMode === 'tavern'
         ? '正在通过酒馆完整上下文调用当前模型…'
-        : fellBack ? '完整上下文接口不可用，已降级到插件资料模式…' : '正在通过插件资料模式调用当前模型…');
+        : fellBack ? '完整上下文接口不可用，已降级到插件资料模式…' : '正在通过插件资料模式调用当前模型…', { cancelable: true });
     try {
         await syncContextSummary(panel);
         const task = buildSessionTask(instruction, panel);
         const requestReplacement = async useSchema => {
             const fallbackContract = useSchema ? '' : '\n\n当前后端可能不支持 JSON Schema。只在 <story_rewriter_replacement_begin> 和 <story_rewriter_replacement_end> 之间输出替换正文，不要 JSON、解释或代码围栏。';
-            if (session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function') {
-                return state.context.generateQuietPrompt({
-                    quietPrompt: `${buildFullContextRewritePrompt(task)}${fallbackContract}`,
-                    quietToLoud: false,
-                    skipWIAN: false,
+            return runGenerationCall(session, '局部替换', () => {
+                if (session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function') {
+                    return state.context.generateQuietPrompt({
+                        quietPrompt: `${buildFullContextRewritePrompt(task)}${fallbackContract}`,
+                        quietToLoud: false,
+                        skipWIAN: false,
+                        responseLength: state.settings.responseLength,
+                        jsonSchema: useSchema ? REPLACEMENT_JSON_SCHEMA : null,
+                        removeReasoning: true,
+                        trimToSentence: false,
+                    });
+                }
+                if (typeof state.context.generateRaw !== 'function') throw new Error('当前 SillyTavern 不提供可用的后台生成接口。');
+                return state.context.generateRaw({
+                    systemPrompt: DEFAULT_SYSTEM_PROMPT,
+                    prompt: `${buildRewritePrompt(task)}${fallbackContract}`,
                     responseLength: state.settings.responseLength,
                     jsonSchema: useSchema ? REPLACEMENT_JSON_SCHEMA : null,
-                    removeReasoning: true,
-                    trimToSentence: false,
+                    trimNames: false,
                 });
-            }
-            if (typeof state.context.generateRaw !== 'function') throw new Error('当前 SillyTavern 不提供可用的后台生成接口。');
-            return state.context.generateRaw({
-                systemPrompt: DEFAULT_SYSTEM_PROMPT,
-                prompt: `${buildRewritePrompt(task)}${fallbackContract}`,
+            }, {
+                attempt: useSchema ? 1 : 2,
                 responseLength: state.settings.responseLength,
-                jsonSchema: useSchema ? REPLACEMENT_JSON_SCHEMA : null,
-                trimNames: false,
             });
         };
         let response = await requestReplacement(true);
+        if (session.cancelled) throw new GenerationCancelledError();
         let candidate = cleanModelResponse(removeConfiguredReasoning(response));
         if (!candidate) {
             panel.querySelector('.story-rewriter-status').textContent = '当前模型未返回可用的结构化替换，正在切换纯文本协议…';
             response = await requestReplacement(false);
+            if (session.cancelled) throw new GenerationCancelledError();
             candidate = cleanModelResponse(removeConfiguredReasoning(response));
         }
         if (!candidate) throw new Error('模型返回了空内容。');
@@ -649,8 +728,11 @@ async function generatePreciseCandidate(panel) {
         panel.querySelector('.story-rewriter-status').textContent = '新版本已生成。可以继续提出要求或应用为新版本。';
     } catch (error) {
         console.error('[Story Rewriter] generation failed', error);
-        panel.querySelector('.story-rewriter-status').textContent = `生成失败：${error.message ?? error}`;
+        panel.querySelector('.story-rewriter-status').textContent = isGenerationCancelled(error)
+            ? '已取消本次生成。'
+            : `生成失败：${error.message ?? error}`;
     } finally {
+        session.generationInProgress = false;
         if (panel.isConnected && state.panel === panel) {
             setWorkspaceBusy(panel, false, panel.querySelector('.story-rewriter-status').textContent);
         }
@@ -756,21 +838,21 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
     let currentPrompt = prompt;
     let lastError;
     for (let attempt = 0; attempt < 2; attempt++) {
-        if (session.cancelled) throw new Error('已取消本次生成。');
-        let response;
-        if (session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function') {
-            response = await state.context.generateQuietPrompt({
-                quietPrompt: currentPrompt,
-                quietToLoud: false,
-                skipWIAN: false,
-                responseLength,
-                jsonSchema: attempt === 0 ? schema : null,
-                removeReasoning: true,
-                trimToSentence: false,
-            });
-        } else {
+        if (session.cancelled) throw new GenerationCancelledError();
+        const response = await runGenerationCall(session, stageLabel, () => {
+            if (session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function') {
+                return state.context.generateQuietPrompt({
+                    quietPrompt: currentPrompt,
+                    quietToLoud: false,
+                    skipWIAN: false,
+                    responseLength,
+                    jsonSchema: attempt === 0 ? schema : null,
+                    removeReasoning: true,
+                    trimToSentence: false,
+                });
+            }
             if (typeof state.context.generateRaw !== 'function') throw new Error('当前 SillyTavern 不提供可用的后台生成接口。');
-            response = await state.context.generateRaw({
+            return state.context.generateRaw({
                 systemPrompt: attempt === 0
                     ? 'You are a source-grounded fiction editing agent. Follow the JSON schema and never reveal hidden reasoning.'
                     : 'You are a source-grounded fiction editing agent. Return one compact JSON object between the requested boundary markers and never reveal hidden reasoning.',
@@ -779,8 +861,8 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
                 jsonSchema: attempt === 0 ? schema : null,
                 trimNames: false,
             });
-        }
-        if (session.cancelled) throw new Error('已取消本次生成。');
+        }, { attempt: attempt + 1, responseLength });
+        if (session.cancelled) throw new GenerationCancelledError();
         try {
             return parser(removeConfiguredReasoning(response));
         } catch (error) {
@@ -799,31 +881,31 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
     throw lastError ?? new Error(`${stageLabel}失败。`);
 }
 
-async function generatePlain(prompt, responseLength, session) {
-    if (session.cancelled) throw new Error('已取消本次生成。');
-    let response;
-    if (session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function') {
-        response = await state.context.generateQuietPrompt({
-            quietPrompt: prompt,
-            quietToLoud: false,
-            skipWIAN: false,
-            responseLength,
-            // Some model/preset combinations classify the entire final answer as
-            // reasoning. Keep the raw text here and remove only explicit blocks
-            // in parseRevisionTextSegment so valid story text is not erased.
-            removeReasoning: false,
-            trimToSentence: false,
-        });
-    } else {
+async function generatePlain(prompt, responseLength, session, metadata = {}) {
+    if (session.cancelled) throw new GenerationCancelledError();
+    const response = await runGenerationCall(session, '完整正文', () => {
+        if (session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function') {
+            return state.context.generateQuietPrompt({
+                quietPrompt: prompt,
+                quietToLoud: false,
+                skipWIAN: false,
+                responseLength,
+                // Some model/preset combinations classify the entire final answer as
+                // reasoning. Keep the raw text here and remove only explicit blocks
+                // in parseRevisionTextSegment so valid story text is not erased.
+                removeReasoning: false,
+                trimToSentence: false,
+            });
+        }
         if (typeof state.context.generateRaw !== 'function') throw new Error('当前 SillyTavern 不提供可用的后台生成接口。');
-        response = await state.context.generateRaw({
+        return state.context.generateRaw({
             systemPrompt: 'You are a source-grounded fiction editing agent. Output only the requested story text and terminal marker. Never reveal hidden reasoning.',
             prompt,
             responseLength,
             trimNames: false,
         });
-    }
-    if (session.cancelled) throw new Error('已取消本次生成。');
+    }, { ...metadata, responseLength });
+    if (session.cancelled) throw new GenerationCancelledError();
     return String(removeConfiguredReasoning(String(response ?? '')) ?? '');
 }
 
@@ -1171,11 +1253,31 @@ function showCandidate(panel, candidate, instruction) {
             : `候选已生成。${continuationNotice}${filteredNotice}可以逐块确认、继续提出要求，或应用为新版本。`;
 }
 
+function savePartialCheckpoint(session, candidate, segments, metadata = {}) {
+    const text = String(candidate ?? '').trim();
+    if (!text) return;
+    if (text.length >= String(session.partialCandidate ?? '').length) {
+        session.partialCandidate = text;
+        session.partialSegments = segments;
+    }
+    generationLog('checkpoint', {
+        ...metadata,
+        segment: segments,
+        responseCharacters: text.length,
+    });
+}
+
+function describePartialRecovery(error) {
+    if (isGenerationCancelled(error)) return '生成已取消，已保留取消前收到的正文。';
+    if (isGenerationTimeout(error)) return `${error.message}已保留超时前收到的正文。`;
+    return `后续生成中断：${error?.message ?? error}。已保留中断前收到的正文。`;
+}
+
 async function generateCompleteRevision(panel, instruction) {
     const session = state.session;
     const task = session.pendingTask;
     const effectivePlan = getEffectiveImpactPlan(session.impactPlan);
-    setWorkspaceBusy(panel, true, '正在生成完整候选稿…');
+    setWorkspaceBusy(panel, true, '正在生成完整候选稿…', { cancelable: true });
     try {
         const limits = session.activeLimits ?? await getActiveGenerationLimits();
         session.activeLimits = limits;
@@ -1196,6 +1298,7 @@ async function generateCompleteRevision(panel, instruction) {
             let assembled = '';
             let complete = false;
             let segments = 0;
+            let stopReason = 'marker_missing';
 
             while (!complete && segments < MAX_REVISION_SEGMENTS && remainingBudget >= 256) {
                 const promptTokens = await countTokens(prompt);
@@ -1206,6 +1309,7 @@ async function generateCompleteRevision(panel, instruction) {
                     if (!assembled) {
                         throw new Error(`完整候选请求至少需要 ${formatTokenCount(promptTokens + minimumOutput)} 上下文和 ${formatTokenCount(minimumOutput)} 单次响应空间。请检查当前预设上限，或缩短原文与资料。`);
                     }
+                    stopReason = 'budget_exhausted';
                     break;
                 }
                 let parsed = { text: '', complete: false };
@@ -1216,7 +1320,11 @@ async function generateCompleteRevision(panel, instruction) {
                         '上一次响应没有任何可用正文，可能只生成了推理内容或空的结束标记。不要分析，不要说明原因；立即从正文第一个字符（续接时为下一个字符）开始输出，并在真正完成后追加结束标记。',
                         '</empty_response_retry>',
                     ].join('\n\n');
-                    const raw = await generatePlain(requestPrompt, responseLength, session);
+                    const raw = await generatePlain(requestPrompt, responseLength, session, {
+                        segment: segments + 1,
+                        attempt: emptyAttempt + 1,
+                        promptTokens,
+                    });
                     parsed = parseRevisionTextSegment(raw);
                     if (parsed.text || (parsed.complete && assembled)) break;
                     console.warn('[Story Rewriter] model returned no usable revision text', {
@@ -1236,15 +1344,30 @@ async function generateCompleteRevision(panel, instruction) {
                 complete = parsed.complete;
                 segments++;
                 if (!assembled) throw new Error('模型连续两次只返回了推理或空内容。请检查当前预设的推理格式与最大响应 Token，或稍后重试。');
-                if (complete) break;
+                savePartialCheckpoint(session, assembled, segments, { complete });
+                if (complete) {
+                    stopReason = 'completed';
+                    break;
+                }
 
                 const usedTokens = await countTokens(assembled);
                 remainingBudget = Math.max(0, desiredResponseLength - usedTokens);
-                if (remainingBudget < 256) break;
-                panel.querySelector('.story-rewriter-status').textContent = `正文达到单次响应上限，正在自动续接第 ${segments + 1} 段…`;
+                if (remainingBudget < 256) {
+                    stopReason = 'budget_exhausted';
+                    break;
+                }
+                panel.querySelector('.story-rewriter-status').textContent = `第 ${segments} 段未返回正文结束标记，正在请求第 ${segments + 1} 段…`;
                 prompt = buildRevisionContinuationPrompt(revisionTask, assembled);
             }
-            return { assembled, complete, segments };
+            if (!complete && segments >= MAX_REVISION_SEGMENTS) stopReason = 'segment_limit';
+            generationLog('revision_stop', {
+                stage: '完整正文',
+                segment: segments,
+                responseCharacters: assembled.length,
+                complete,
+                stopReason,
+            });
+            return { assembled, complete, segments, stopReason };
         };
 
         let result = await runRevision(buildRevisionPrompt(revisionTask));
@@ -1255,10 +1378,15 @@ async function generateCompleteRevision(panel, instruction) {
             coverage = assessRevisionCompleteness(session.capture.messageText, result.assembled, effectivePlan);
         }
         if (!result.assembled) throw new Error('模型没有返回可用的完整候选正文。');
-        if (state.session !== session || !panel.isConnected || session.cancelled) return;
+        if (state.session !== session || !panel.isConnected) return;
+        if (session.cancelled) throw new GenerationCancelledError();
         session.generationIncomplete = !result.complete || !coverage.complete;
         session.generationIncompleteReason = !result.complete
-            ? '没有收到正文结束标记，可能仍被截断。请检查文章结尾。'
+            ? result.stopReason === 'segment_limit'
+                ? `已达到最多 ${MAX_REVISION_SEGMENTS} 个续接分段，仍未收到正文结束标记。请检查文章结尾。`
+                : result.stopReason === 'budget_exhausted'
+                    ? '完整候选已用完本轮总预算，但未收到正文结束标记。请检查文章结尾。'
+                    : '没有收到正文结束标记，模型可能已结束，也可能仍被截断。请检查文章结尾。'
             : !coverage.complete
                 ? `候选只有原文约 ${Math.round(coverage.lengthRatio * 100)}%，不足以覆盖应保留内容。请检查全文。`
                 : '';
@@ -1268,8 +1396,21 @@ async function generateCompleteRevision(panel, instruction) {
         session.pendingInstruction = '';
     } catch (error) {
         console.error('[Story Rewriter] complete revision failed', error);
-        panel.querySelector('.story-rewriter-status').textContent = `生成失败：${error.message ?? error}`;
+        const partial = String(session.partialCandidate ?? '').trim();
+        if (partial && state.session === session && panel.isConnected) {
+            session.generationIncomplete = true;
+            session.generationIncompleteReason = describePartialRecovery(error);
+            session.generationSegments = session.partialSegments;
+            showCandidate(panel, partial, instruction);
+            session.pendingTask = null;
+            session.pendingInstruction = '';
+        } else if (panel.isConnected) {
+            panel.querySelector('.story-rewriter-status').textContent = isGenerationCancelled(error)
+                ? '已取消本次生成；取消前尚未收到可保留的正文。'
+                : `生成失败：${error.message ?? error}`;
+        }
     } finally {
+        session.generationInProgress = false;
         if (panel.isConnected && state.panel === panel) {
             setWorkspaceBusy(panel, false, panel.querySelector('.story-rewriter-status').textContent);
         }
@@ -1288,11 +1429,11 @@ async function generateSemanticCandidate(panel) {
         panel.querySelector('.story-rewriter-status').textContent = '原消息、聊天或 Swipe 已变化，请重新打开工作台。';
         return;
     }
-    session.cancelled = false;
+    startGenerationSession(session);
     session.influence = session.scopeMode === 'selection' ? 'strict' : 'semantic';
     const constraints = panel.querySelector('.story-rewriter-constraints').value.trim();
     const fellBack = applyAutomaticContextFallback(panel);
-    setWorkspaceBusy(panel, true, fellBack ? '完整上下文接口不可用，已降级并建立故事资料视图…' : '正在建立故事资料视图…');
+    setWorkspaceBusy(panel, true, fellBack ? '完整上下文接口不可用，已降级并建立故事资料视图…' : '正在建立故事资料视图…', { cancelable: true });
     try {
         const limits = await syncContextSummary(panel);
         const paragraphs = segmentMessage(session.capture.messageText);
@@ -1301,7 +1442,7 @@ async function generateSemanticCandidate(panel) {
             : getFocusParagraphIds(paragraphs, session.capture.range, session.editMode);
         if (session.editMode !== 'full' && !focusIds.length) throw new Error('无法把选区映射到原文段落。');
         const repository = await buildSemanticRepository(session, instruction, constraints);
-        if (session.cancelled) throw new Error('已取消本次生成。');
+        if (session.cancelled) throw new GenerationCancelledError();
         session.repository = repository;
         panel.querySelector('.story-rewriter-status').textContent = `找到 ${repository.retrieval.items.length} 条相关资料，正在识别影响范围…`;
         const mandatoryReferences = [{
@@ -1351,6 +1492,7 @@ async function generateSemanticCandidate(panel) {
                     '影响分析',
                 );
             } catch (error) {
+                if (isGenerationCancelled(error)) throw error;
                 fallbackReason = String(error?.message ?? error);
                 console.warn('[Story Rewriter] structured impact analysis unavailable; using conservative local plan', error);
                 rawPlan = createConservativeImpactPlan(paragraphs, focusIds, instruction, session.editMode);
@@ -1372,7 +1514,10 @@ async function generateSemanticCandidate(panel) {
         }
     } catch (error) {
         console.error('[Story Rewriter] impact analysis failed', error);
-        panel.querySelector('.story-rewriter-status').textContent = `分析失败：${error.message ?? error}`;
+        session.generationInProgress = false;
+        panel.querySelector('.story-rewriter-status').textContent = isGenerationCancelled(error)
+            ? '已取消本次生成。'
+            : `分析失败：${error.message ?? error}`;
         return;
     } finally {
         if (panel.isConnected && state.panel === panel) {
@@ -1657,10 +1802,15 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
         pendingTask: null,
         pendingInstruction: '',
         cancelled: false,
+        generationInProgress: false,
+        generationController: null,
         activeLimits: null,
         generationIncomplete: false,
         generationIncompleteReason: '',
         generationSegments: 0,
+        partialCandidate: '',
+        partialSegments: 0,
+        generationDiagnostics: [],
     };
 
     const semantic = true;
@@ -1750,8 +1900,7 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
     panel.querySelector('.story-rewriter-close').addEventListener('click', closeWorkspace);
     panel.querySelector('.story-rewriter-cancel').addEventListener('click', () => {
         if (!state.session) return;
-        state.session.cancelled = true;
-        state.context.stopGeneration?.();
+        cancelGenerationSession(state.session);
         panel.querySelector('.story-rewriter-status').textContent = '正在取消本次生成…';
     });
     panel.querySelector('.story-rewriter-generate').addEventListener('click', () => generateCandidate(panel));

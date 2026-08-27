@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 
 const settings = await readFile(new URL('../settings.html', import.meta.url), 'utf8');
 
-test('declares the v0.4 settings controls used by the runtime', () => {
+test('declares the settings controls used by the runtime', () => {
     const ids = [
         'story_rewriter_enabled',
         'story_rewriter_context_mode',
@@ -14,6 +14,7 @@ test('declares the v0.4 settings controls used by the runtime', () => {
         'story_rewriter_retrieval_chars',
         'story_rewriter_retrieval_results',
         'story_rewriter_analysis_length',
+        'story_rewriter_generation_timeout',
         'story_rewriter_persistent_undo',
     ];
     for (const id of ids) assert.match(settings, new RegExp(`id=["']${id}["']`));
