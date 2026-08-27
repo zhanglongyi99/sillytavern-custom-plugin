@@ -27,8 +27,9 @@ import {
     IMPACT_LEVELS,
     mergeRevisionContinuation,
     parseImpactResponse,
-    parseRevisionTextSegment,
+    parseRevisionProviderResponse,
     retrieveReferences,
+    REVISION_BODY_MARKER,
     segmentMessage,
     validateImpactPlan,
 } from './lib/semantic.js';
@@ -164,7 +165,8 @@ function notify(message, type = 'info') {
 function generationLog(event, metadata = {}) {
     const allowed = [
         'stage', 'segment', 'attempt', 'responseLength', 'promptTokens',
-        'elapsedMs', 'responseCharacters', 'complete', 'errorCode', 'stopReason',
+        'elapsedMs', 'responseCharacters', 'providerCharacters', 'usableCharacters',
+        'complete', 'errorCode', 'stopReason', 'parseOutcome',
     ];
     const safe = Object.fromEntries(allowed
         .filter(key => metadata[key] !== undefined)
@@ -185,6 +187,9 @@ function startGenerationSession(session) {
     session.generationController = new AbortController();
     session.partialCandidate = '';
     session.partialSegments = 0;
+    session.partialStage = '';
+    session.activeRevisionStage = '';
+    session.coverageRepairReason = '';
     session.generationDiagnostics = [];
 }
 
@@ -620,6 +625,9 @@ function resetSessionForScopeChange(panel) {
     session.generationSegments = 0;
     session.partialCandidate = '';
     session.partialSegments = 0;
+    session.partialStage = '';
+    session.activeRevisionStage = '';
+    session.coverageRepairReason = '';
     session.generationDiagnostics = [];
     panel.querySelector('.story-rewriter-candidate').value = '';
     panel.querySelector('.story-rewriter-preview').hidden = true;
@@ -883,7 +891,8 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
 
 async function generatePlain(prompt, responseLength, session, metadata = {}) {
     if (session.cancelled) throw new GenerationCancelledError();
-    const response = await runGenerationCall(session, '完整正文', () => {
+    const { stage = '完整正文', ...diagnostics } = metadata;
+    const response = await runGenerationCall(session, stage, () => {
         if (session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function') {
             return state.context.generateQuietPrompt({
                 quietPrompt: prompt,
@@ -904,9 +913,9 @@ async function generatePlain(prompt, responseLength, session, metadata = {}) {
             responseLength,
             trimNames: false,
         });
-    }, { ...metadata, responseLength });
+    }, { ...diagnostics, responseLength });
     if (session.cancelled) throw new GenerationCancelledError();
-    return String(removeConfiguredReasoning(String(response ?? '')) ?? '');
+    return String(response ?? '');
 }
 
 function getEffectiveImpactPlan(plan) {
@@ -1259,6 +1268,7 @@ function savePartialCheckpoint(session, candidate, segments, metadata = {}) {
     if (text.length >= String(session.partialCandidate ?? '').length) {
         session.partialCandidate = text;
         session.partialSegments = segments;
+        session.partialStage = metadata.stage ?? session.activeRevisionStage;
     }
     generationLog('checkpoint', {
         ...metadata,
@@ -1267,10 +1277,16 @@ function savePartialCheckpoint(session, candidate, segments, metadata = {}) {
     });
 }
 
-function describePartialRecovery(error) {
-    if (isGenerationCancelled(error)) return '生成已取消，已保留取消前收到的正文。';
-    if (isGenerationTimeout(error)) return `${error.message}已保留超时前收到的正文。`;
-    return `后续生成中断：${error?.message ?? error}。已保留中断前收到的正文。`;
+function describePartialRecovery(error, session) {
+    const phase = session.activeRevisionStage || '正文生成';
+    const failure = isGenerationCancelled(error)
+        ? '已取消。'
+        : isGenerationTimeout(error) ? `${error.message}` : `中断：${error?.message ?? error}。`;
+    if (session.partialStage && session.partialStage !== phase) {
+        const trigger = session.coverageRepairReason ? `${session.coverageRepairReason}；` : '';
+        return `${trigger}${phase}阶段${failure}当前显示的是已保留的${session.partialStage}候选。`;
+    }
+    return `${phase}阶段${failure}已保留中断前收到的正文。`;
 }
 
 async function generateCompleteRevision(panel, instruction) {
@@ -1292,7 +1308,8 @@ async function generateCompleteRevision(panel, instruction) {
         };
         const maxContext = limits.maxContext;
         const singleResponseLimit = limits.maxResponse || desiredResponseLength;
-        const runRevision = async initialPrompt => {
+        const runRevision = async (initialPrompt, stageLabel) => {
+            session.activeRevisionStage = stageLabel;
             let remainingBudget = desiredResponseLength;
             let prompt = initialPrompt;
             let assembled = '';
@@ -1317,23 +1334,37 @@ async function generateCompleteRevision(panel, instruction) {
                     const requestPrompt = emptyAttempt === 0 ? prompt : [
                         prompt,
                         '<empty_response_retry>',
-                        '上一次响应没有任何可用正文，可能只生成了推理内容或空的结束标记。不要分析，不要说明原因；立即从正文第一个字符（续接时为下一个字符）开始输出，并在真正完成后追加结束标记。',
+                        `上一次响应没有带明确边界的可用正文。不要分析或说明原因；第一行只输出 ${REVISION_BODY_MARKER}，下一行立即从正文第一个字符（续接时为下一个字符）开始，并在真正完成后追加结束标记。`,
                         '</empty_response_retry>',
                     ].join('\n\n');
                     const raw = await generatePlain(requestPrompt, responseLength, session, {
+                        stage: `${stageLabel}·第 ${segments + 1} 段`,
                         segment: segments + 1,
                         attempt: emptyAttempt + 1,
                         promptTokens,
                     });
-                    parsed = parseRevisionTextSegment(raw);
-                    if (parsed.text || (parsed.complete && assembled)) break;
-                    console.warn('[Story Rewriter] model returned no usable revision text', {
+                    parsed = parseRevisionProviderResponse(raw, value => state.context?.parseReasoningFromString?.(value, { strict: false }));
+                    generationLog('parsed', {
+                        stage: stageLabel,
                         segment: segments + 1,
                         attempt: emptyAttempt + 1,
-                        responseCharacters: raw.length,
+                        providerCharacters: raw.length,
+                        usableCharacters: parsed.text.length,
+                        complete: parsed.complete,
+                        parseOutcome: parsed.parseOutcome,
+                    });
+                    if (parsed.text || (parsed.complete && assembled)) break;
+                    console.warn('[Story Rewriter] model returned no usable revision text', {
+                        stage: stageLabel,
+                        segment: segments + 1,
+                        attempt: emptyAttempt + 1,
+                        providerCharacters: raw.length,
+                        usableCharacters: parsed.text.length,
+                        parseOutcome: parsed.parseOutcome,
                     });
                     if (emptyAttempt === 0) {
-                        panel.querySelector('.story-rewriter-status').textContent = '模型首轮只返回了推理或空内容，正在自动重试正文…';
+                        const position = segments === 0 ? stageLabel : `${stageLabel}第 ${segments + 1} 段`;
+                        panel.querySelector('.story-rewriter-status').textContent = `${position}未找到明确正文，正在使用正文边界协议重试…`;
                     }
                 }
                 if (parsed.text) {
@@ -1343,8 +1374,8 @@ async function generateCompleteRevision(panel, instruction) {
                 }
                 complete = parsed.complete;
                 segments++;
-                if (!assembled) throw new Error('模型连续两次只返回了推理或空内容。请检查当前预设的推理格式与最大响应 Token，或稍后重试。');
-                savePartialCheckpoint(session, assembled, segments, { complete });
+                if (!assembled) throw new Error(`${stageLabel}连续两次没有返回带正文边界的可用内容。模型可能只返回了推理、空响应，或没有遵守正文协议。`);
+                savePartialCheckpoint(session, assembled, segments, { complete, stage: stageLabel });
                 if (complete) {
                     stopReason = 'completed';
                     break;
@@ -1356,12 +1387,12 @@ async function generateCompleteRevision(panel, instruction) {
                     stopReason = 'budget_exhausted';
                     break;
                 }
-                panel.querySelector('.story-rewriter-status').textContent = `第 ${segments} 段未返回正文结束标记，正在请求第 ${segments + 1} 段…`;
+                panel.querySelector('.story-rewriter-status').textContent = `${stageLabel}第 ${segments} 段未返回正文结束标记，正在请求第 ${segments + 1} 段…`;
                 prompt = buildRevisionContinuationPrompt(revisionTask, assembled);
             }
             if (!complete && segments >= MAX_REVISION_SEGMENTS) stopReason = 'segment_limit';
             generationLog('revision_stop', {
-                stage: '完整正文',
+                stage: stageLabel,
                 segment: segments,
                 responseCharacters: assembled.length,
                 complete,
@@ -1370,12 +1401,26 @@ async function generateCompleteRevision(panel, instruction) {
             return { assembled, complete, segments, stopReason };
         };
 
-        let result = await runRevision(buildRevisionPrompt(revisionTask));
+        let result = await runRevision(buildRevisionPrompt(revisionTask), '初稿');
         let coverage = assessRevisionCompleteness(session.capture.messageText, result.assembled, effectivePlan);
         if (result.complete && !coverage.complete) {
-            panel.querySelector('.story-rewriter-status').textContent = '模型只返回了局部片段，正在重新请求完整消息…';
-            result = await runRevision(buildRevisionCoverageRepairPrompt(revisionTask, coverage));
-            coverage = assessRevisionCompleteness(session.capture.messageText, result.assembled, effectivePlan);
+            const initialResult = result;
+            const initialCoverage = coverage;
+            session.coverageRepairReason = `初稿只覆盖原文约 ${Math.round(coverage.lengthRatio * 100)}%`;
+            panel.querySelector('.story-rewriter-status').textContent = `${session.coverageRepairReason}，正在进行完整性修复…`;
+            const repaired = await runRevision(buildRevisionCoverageRepairPrompt(revisionTask, coverage), '完整性修复');
+            const repairedCoverage = assessRevisionCompleteness(session.capture.messageText, repaired.assembled, effectivePlan);
+            if (repairedCoverage.complete || repairedCoverage.candidateCharacters >= initialCoverage.candidateCharacters) {
+                result = repaired;
+                coverage = repairedCoverage;
+                if (!repairedCoverage.complete) {
+                    session.coverageRepairReason = `完整性修复后候选仍只覆盖原文约 ${Math.round(repairedCoverage.lengthRatio * 100)}%`;
+                }
+            } else {
+                result = initialResult;
+                coverage = initialCoverage;
+                session.coverageRepairReason += '；完整性修复返回的内容更少，因此继续保留初稿';
+            }
         }
         if (!result.assembled) throw new Error('模型没有返回可用的完整候选正文。');
         if (state.session !== session || !panel.isConnected) return;
@@ -1388,7 +1433,7 @@ async function generateCompleteRevision(panel, instruction) {
                     ? '完整候选已用完本轮总预算，但未收到正文结束标记。请检查文章结尾。'
                     : '没有收到正文结束标记，模型可能已结束，也可能仍被截断。请检查文章结尾。'
             : !coverage.complete
-                ? `候选只有原文约 ${Math.round(coverage.lengthRatio * 100)}%，不足以覆盖应保留内容。请检查全文。`
+                ? `${session.coverageRepairReason || `候选只有原文约 ${Math.round(coverage.lengthRatio * 100)}%`}，不足以覆盖应保留内容。请检查全文。`
                 : '';
         session.generationSegments = result.segments;
         showCandidate(panel, result.assembled, instruction);
@@ -1399,7 +1444,7 @@ async function generateCompleteRevision(panel, instruction) {
         const partial = String(session.partialCandidate ?? '').trim();
         if (partial && state.session === session && panel.isConnected) {
             session.generationIncomplete = true;
-            session.generationIncompleteReason = describePartialRecovery(error);
+            session.generationIncompleteReason = describePartialRecovery(error, session);
             session.generationSegments = session.partialSegments;
             showCandidate(panel, partial, instruction);
             session.pendingTask = null;
@@ -1810,6 +1855,9 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
         generationSegments: 0,
         partialCandidate: '',
         partialSegments: 0,
+        partialStage: '',
+        activeRevisionStage: '',
+        coverageRepairReason: '',
         generationDiagnostics: [],
     };
 

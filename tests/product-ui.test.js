@@ -49,15 +49,15 @@ test('continues long plain-text revisions instead of wrapping the article in JSO
     assert.match(runtime, /MAX_REVISION_SEGMENTS = 8/);
     assert.match(runtime, /fullResponseLength: 32768/);
     assert.match(runtime, /buildRevisionContinuationPrompt/);
-    assert.match(runtime, /parseRevisionTextSegment/);
+    assert.match(runtime, /parseRevisionProviderResponse/);
     assert.match(runtime, /mergeRevisionContinuation/);
     assert.match(runtime, /未返回正文结束标记，正在请求/);
     assert.match(runtime, /removeReasoning: false/);
     assert.match(runtime, /parseReasoningFromString/);
     assert.doesNotMatch(runtime, /scripts\/reasoning\.js/);
-    assert.match(runtime, /模型首轮只返回了推理或空内容，正在自动重试正文/);
+    assert.match(runtime, /未找到明确正文，正在使用正文边界协议重试/);
     assert.match(runtime, /assessRevisionCompleteness/);
-    assert.match(runtime, /模型只返回了局部片段，正在重新请求完整消息/);
+    assert.match(runtime, /正在进行完整性修复/);
     assert.match(runtime, /session\.generationIncomplete && change\.kind === 'deleted'/);
     assert.doesNotMatch(runtime, /generateStructured\([\s\S]{0,160}REVISION_JSON_SCHEMA/);
 });
@@ -66,10 +66,18 @@ test('bounds every model call and preserves partial long-form output', () => {
     assert.match(runtime, /generationTimeoutSeconds: 180/);
     assert.match(runtime, /runGenerationCall\(session, '局部替换'/);
     assert.match(runtime, /runGenerationCall\(session, stageLabel/);
-    assert.match(runtime, /runGenerationCall\(session, '完整正文'/);
+    assert.match(runtime, /runGenerationCall\(session, stage/);
     assert.match(runtime, /session\.partialCandidate/);
-    assert.match(runtime, /已保留超时前收到的正文/);
+    assert.match(runtime, /isGenerationTimeout/);
+    assert.match(runtime, /保留中断前收到的正文/);
     assert.doesNotMatch(runtime, /正文达到单次响应上限，正在自动续接/);
+});
+
+test('labels initial drafting and coverage repair as separate phases', () => {
+    assert.match(runtime, /runRevision\(buildRevisionPrompt\(revisionTask\), '初稿'\)/);
+    assert.match(runtime, /runRevision\(buildRevisionCoverageRepairPrompt\(revisionTask, coverage\), '完整性修复'\)/);
+    assert.match(runtime, /当前显示的是已保留的/);
+    assert.match(runtime, /parseOutcome/);
 });
 
 test('keeps Tavern context authoritative and degrades by capability', () => {

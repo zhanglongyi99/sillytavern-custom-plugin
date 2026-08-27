@@ -20,8 +20,10 @@ import {
     getFocusParagraphIds,
     IMPACT_JSON_SCHEMA,
     mergeRevisionContinuation,
-    parseRevisionTextSegment,
     parseImpactResponse,
+    parseRevisionProviderResponse,
+    parseRevisionTextSegment,
+    REVISION_BODY_MARKER,
     REVISION_END_MARKER,
     retrieveReferences,
     segmentMessage,
@@ -151,6 +153,7 @@ test('builds source-grounded two-stage prompts without character offsets', () =>
     assert.match(revisionPrompt, /完整的新消息/);
     assert.match(revisionPrompt, /用户逐块筛选后的当前合成稿/);
     assert.match(revisionPrompt, new RegExp(REVISION_END_MARKER.replace(/[\[\]]/g, '\\$&')));
+    assert.match(revisionPrompt, new RegExp(REVISION_BODY_MARKER.replace(/[\[\]]/g, '\\$&')));
     assert.match(revisionPrompt, /不要输出.*JSON/);
 });
 
@@ -178,6 +181,45 @@ test('parses terminal markers and detects an incomplete plain-text revision', ()
     assert.deepEqual(
         parseRevisionTextSegment(`<final>最终正文\n${REVISION_END_MARKER}</final>`),
         { text: '最终正文', complete: true },
+    );
+    assert.deepEqual(
+        parseRevisionTextSegment(`<analysis>${REVISION_BODY_MARKER}\n被包装的正文\n${REVISION_END_MARKER}</analysis>`),
+        { text: '被包装的正文', complete: true },
+    );
+});
+
+test('recovers only explicitly marked body text from a configured reasoning channel', () => {
+    const configuredParser = value => {
+        const match = String(value).match(/<custom-thought>([\s\S]*?)<\/custom-thought>/);
+        return match
+            ? { reasoning: match[1], content: String(value).replace(match[0], '').trim() }
+            : { reasoning: '', content: String(value) };
+    };
+    assert.deepEqual(
+        parseRevisionProviderResponse(
+            `<custom-thought>规划内容\n${REVISION_BODY_MARKER}\n安全正文\n${REVISION_END_MARKER}</custom-thought>`,
+            configuredParser,
+        ),
+        { text: '安全正文', complete: true, parseOutcome: 'configured_protocol_recovery' },
+    );
+    assert.deepEqual(
+        parseRevisionProviderResponse(
+            `<custom-thought>${REVISION_BODY_MARKER}\n优先采用明确正文\n${REVISION_END_MARKER}</custom-thought>\n模型附加说明`,
+            configuredParser,
+        ),
+        { text: '优先采用明确正文', complete: true, parseOutcome: 'configured_protocol_recovery' },
+    );
+    assert.deepEqual(
+        parseRevisionProviderResponse('<custom-thought>只有真实推理，没有正文标记</custom-thought>', configuredParser),
+        { text: '', complete: false, parseOutcome: 'reasoning_only' },
+    );
+    assert.deepEqual(
+        parseRevisionProviderResponse(`<custom-thought>思考中只是提到 ${REVISION_BODY_MARKER}，并没有开始输出正文</custom-thought>`, configuredParser),
+        { text: '', complete: false, parseOutcome: 'reasoning_only' },
+    );
+    assert.deepEqual(
+        parseRevisionProviderResponse('<custom-thought>内部推理</custom-thought>\n外部正文', configuredParser),
+        { text: '外部正文', complete: false, parseOutcome: 'configured_content' },
     );
 });
 
