@@ -113,8 +113,15 @@ test('supports block-level acceptance and a long-text review workspace', () => {
     assert.match(runtime, /change\.classification !== 'protected'/);
     assert.match(runtime, /composeRevisionFromDecisions/);
     assert.match(runtime, /story-rewriter-resize-handle/);
+    assert.match(runtime, /story-rewriter-maximize/);
+    assert.match(runtime, /保留原文/);
+    assert.match(runtime, /采用新版/);
+    assert.match(runtime, /上下对照/);
+    assert.match(runtime, /疑似越界/);
     assert.match(runtime, /switchWorkspaceView\(panel, 'changes'\)/);
-    assert.match(styles, /width: min\(760px, 96vw\)/);
+    assert.match(styles, /width: min\(960px, 98vw\)/);
+    assert.match(styles, /\.story-rewriter-panel\.is-maximized/);
     assert.match(styles, /\.story-rewriter-panel:not\(\.is-selection-scope\) \.story-rewriter-candidate\s*\{[\s\S]*?min-height: 48vh/);
-    assert.match(styles, /\.story-rewriter-diff-pair\s*\{[\s\S]*?grid-template-columns/);
+    assert.match(styles, /\.story-rewriter-diff-pair\s*\{[\s\S]*?grid-template-columns: minmax\(0, 1fr\)/);
+    assert.match(styles, /\.story-rewriter-panel\.is-review-side \.story-rewriter-diff-pair\s*\{[\s\S]*?grid-template-columns: minmax\(0, 1fr\) minmax\(0, 1fr\)/);
 });

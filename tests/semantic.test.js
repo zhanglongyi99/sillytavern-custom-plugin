@@ -377,7 +377,8 @@ test('audits changes outside the planned region', () => {
     };
     const audit = auditRevision(original, revised, plan, { editMode: 'semantic' });
     assert.equal(audit.counts.focus, 1);
-    assert.equal(audit.counts.protected, 3);
+    assert.equal(audit.counts.protected, 1);
+    assert.deepEqual(audit.changes.find(change => change.classification === 'protected').originalIds, ['P002', 'P003', 'P004']);
     assert.equal(audit.hardBlocked, true);
 });
 
@@ -399,7 +400,7 @@ test('composes a revision from independently accepted change blocks', () => {
     );
 });
 
-test('keeps rewritten paragraphs aligned after a leading insertion', () => {
+test('keeps a leading insertion separate without shifting later fuzzy matches', () => {
     const original = '贞德在教堂等待旧计划。\n\n玛修留在基地保持警戒。\n\n黄毛准备第二天的行动。';
     const revised = '新增的前情导语。\n\n贞德在教堂开始执行新计划。\n\n玛修仍在基地保持警戒。\n\n黄毛开始准备次日行动。';
     const changes = buildChangedBlocks(segmentMessage(original), segmentMessage(revised));
@@ -419,15 +420,62 @@ test('places a lone smart-rewrite fragment back onto its most similar source par
     const original = '玛修留在基地等待命令。\n\n贞德在教堂执行旧计划并等待黄毛。\n\n凛奴负责外围调查。\n\n黄毛准备第二天的行动。';
     const fragment = '贞德改为在教堂主动协助黄毛执行新计划。';
     const changes = buildChangedBlocks(segmentMessage(original), segmentMessage(fragment));
-    assert.deepEqual(changes.map(change => [change.kind, change.originalId]), [
-        ['deleted', 'P001'],
-        ['modified', 'P002'],
-        ['deleted', 'P003'],
-        ['deleted', 'P004'],
-    ]);
+    const replacement = changes.find(change => change.kind === 'modified');
+    assert.equal(replacement.originalId, 'P002');
+    assert.deepEqual(replacement.originalIndices, [1]);
     assert.equal(
-        composeRevisionFromDecisions(original, fragment, new Set(['C002'])),
+        composeRevisionFromDecisions(original, fragment, new Set([replacement.id])),
         '玛修留在基地等待命令。\n\n贞德改为在教堂主动协助黄毛执行新计划。\n\n凛奴负责外围调查。\n\n黄毛准备第二天的行动。',
+    );
+});
+
+test('aligns one rewritten paragraph with a three-paragraph expansion between stable anchors', () => {
+    const original = '开头保持。\n\n贞德在教堂制定潜入计划并联系玛修。\n\n结尾保持。';
+    const revised = '开头保持。\n\n贞德在教堂制定潜入计划。\n\n她随后联系玛修确认时间。\n\n最后检查撤退路线。\n\n结尾保持。';
+    const changes = buildChangedBlocks(segmentMessage(original), segmentMessage(revised));
+    assert.equal(changes.length, 1);
+    assert.deepEqual(changes[0].originalIndices, [1]);
+    assert.deepEqual(changes[0].candidateIndices, [1, 2, 3]);
+    assert.equal(composeRevisionFromDecisions(original, revised, [changes[0].id]), revised);
+});
+
+test('aligns three source paragraphs with one consolidated candidate paragraph', () => {
+    const original = '开头保持。\n\n贞德确认潜入时间。\n\n玛修准备接应路线。\n\n凛负责撤退车辆。\n\n结尾保持。';
+    const revised = '开头保持。\n\n贞德确认潜入时间后，由玛修准备接应路线，凛则负责撤退车辆。\n\n结尾保持。';
+    const changes = buildChangedBlocks(segmentMessage(original), segmentMessage(revised));
+    assert.equal(changes.length, 1);
+    assert.deepEqual(changes[0].originalIndices, [1, 2, 3]);
+    assert.deepEqual(changes[0].candidateIndices, [1]);
+    assert.equal(composeRevisionFromDecisions(original, revised, [changes[0].id]), revised);
+});
+
+test('does not force an unrelated candidate fragment onto a multi-paragraph source group', () => {
+    const original = '甲负责天气记录。\n\n乙维护仓库清单。\n\n丙检查车辆油量。';
+    const revised = '全新的舞台说明。\n\n另一条无关公告。\n\n结尾也是新内容。';
+    const changes = buildChangedBlocks(segmentMessage(original), segmentMessage(revised));
+    assert.equal(changes.length, 3);
+    assert.ok(changes.every(change => change.originalIndices.length <= 1 && change.candidateIndices.length <= 1));
+    assert.ok(changes.every(change => change.similarity < 0.12));
+});
+
+test('coalesces adjacent planned rewrites into bounded human-review hunks', () => {
+    const originalLines = ['稳定开头。', ...Array.from({ length: 12 }, (_, index) => `第${index + 1}段人物执行原行动。`), '稳定结尾。'];
+    const revisedLines = ['稳定开头。', ...Array.from({ length: 12 }, (_, index) => `第${index + 1}段人物执行新版行动并补充细节。`), '稳定结尾。'];
+    const original = originalLines.join('\n');
+    const revised = revisedLines.join('\n');
+    const paragraphs = segmentMessage(original);
+    const plan = {
+        focusRegions: paragraphs.slice(1, -1).map(paragraph => ({ paragraphId: paragraph.id })),
+        linkedRegions: [],
+        transitionRegions: [],
+        protectedFacts: [],
+    };
+    const audit = auditRevision(original, revised, plan);
+    assert.ok(audit.changes.length <= 3);
+    assert.ok(audit.changes.every(change => change.originalIndices.length <= 5));
+    assert.equal(
+        composeRevisionFromDecisions(original, revised, audit.changes.map(change => change.id), audit.alignment),
+        revised,
     );
 });
 
@@ -457,7 +505,8 @@ test('does not exempt unselected whole-message edits from scope auditing', () =>
     const revised = '重写一。\n\n重写二。\n\n重写三。\n\n重写四。';
     const plan = { focusRegions: [], linkedRegions: [], transitionRegions: [], protectedFacts: [] };
     const audit = auditRevision(original, revised, plan, { editMode: 'full' });
-    assert.equal(audit.counts.protected, 4);
+    assert.equal(audit.counts.protected, 1);
+    assert.deepEqual(audit.changes[0].originalIds, ['P001', 'P002', 'P003', 'P004']);
     assert.equal(audit.hardBlocked, true);
 });
 

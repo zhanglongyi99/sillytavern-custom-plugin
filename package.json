@@ -1,6 +1,6 @@
 {
   "name": "sillytavern-custom-plugin",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "description": "Source-grounded precise and semantic story rewriting for SillyTavern messages.",
   "type": "module",
   "scripts": {

@@ -139,15 +139,28 @@
     display: flex;
     flex-direction: column;
     box-sizing: border-box;
-    width: min(760px, 96vw);
-    min-width: min(420px, 96vw);
-    max-width: 96vw;
+    width: min(960px, 98vw);
+    min-width: min(560px, 98vw);
+    max-width: 98vw;
     overflow: hidden;
     color: var(--SmartThemeBodyColor, #eee);
     background: var(--SmartThemeBlurTintColor, #20242b);
     border-left: 1px solid var(--SmartThemeBorderColor, #666);
     box-shadow: -14px 0 42px rgb(0 0 0 / 45%);
     animation: story-rewriter-slide-in 150ms ease-out;
+}
+
+.story-rewriter-panel.is-maximized {
+    inset: 10px;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+    border: 1px solid var(--SmartThemeBorderColor, #666);
+    border-radius: 12px;
+}
+
+.story-rewriter-panel.is-maximized .story-rewriter-resize-handle {
+    display: none;
 }
 
 .story-rewriter-resize-handle {
@@ -178,6 +191,19 @@
     flex: 0 0 auto;
     padding: 14px 16px;
     border-bottom: 1px solid var(--SmartThemeBorderColor, #666);
+}
+
+.story-rewriter-window-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.story-rewriter-maximize,
+.story-rewriter-close {
+    display: inline-grid;
+    place-items: center;
+    flex: 0 0 auto;
 }
 
 .story-rewriter-panel-header h3,
@@ -372,13 +398,14 @@
     top: -1px;
     z-index: 2;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 10px;
-    padding: 9px 10px;
+    padding: 10px 12px;
     background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #20242b) 96%, black);
     border: 1px solid var(--SmartThemeBorderColor, #666);
-    border-radius: 7px;
+    border-radius: 10px;
+    box-shadow: 0 6px 22px rgb(0 0 0 / 18%);
 }
 
 .story-rewriter-review-actions {
@@ -386,10 +413,21 @@
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: 6px;
+    max-width: 78%;
 }
 
 .story-rewriter-review-actions .menu_button {
+    width: auto;
+    min-width: max-content;
     padding: 5px 8px;
+    writing-mode: horizontal-tb;
+    white-space: nowrap;
+}
+
+.story-rewriter-review-actions .is-active {
+    color: var(--SmartThemeQuoteColor, #8bd5ff);
+    background: rgb(139 213 255 / 14%);
+    border-color: color-mix(in srgb, var(--SmartThemeQuoteColor, #8bd5ff) 70%, transparent);
 }
 
 .story-rewriter-review-list {
@@ -399,10 +437,26 @@
 }
 
 .story-rewriter-diff-card {
-    padding: 8px 10px;
-    background: rgb(255 255 255 / 4%);
+    padding: 12px;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #20242b) 88%, white 4%);
     border-left: 4px solid #777;
-    border-radius: 6px;
+    border-radius: 10px;
+    box-shadow: 0 5px 20px rgb(0 0 0 / 14%);
+    scroll-margin: 90px 0 140px;
+    transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+}
+
+.story-rewriter-diff-card:focus {
+    outline: 2px solid color-mix(in srgb, var(--SmartThemeQuoteColor, #8bd5ff) 70%, transparent);
+    outline-offset: 2px;
+}
+
+.story-rewriter-diff-card.is-accepted {
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #20242b) 86%, #56c271 6%);
+}
+
+.story-rewriter-diff-card.is-reviewed {
+    box-shadow: 0 5px 20px rgb(0 0 0 / 14%), inset 0 0 0 1px rgb(255 255 255 / 8%);
 }
 
 .story-rewriter-diff-card.is-focus { border-color: #56c271; }
@@ -412,29 +466,92 @@
 
 .story-rewriter-diff-heading {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 10px;
+}
+
+.story-rewriter-change-title {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 7px;
+    min-width: 0;
+}
+
+.story-rewriter-change-badge {
+    padding: 3px 7px;
+    font-size: 0.82em;
+    font-weight: 700;
+    background: rgb(255 255 255 / 8%);
+    border-radius: 999px;
+}
+
+.story-rewriter-change-state {
+    opacity: 0.72;
+    font-size: 0.88em;
 }
 
 .story-rewriter-change-decision {
     display: inline-flex !important;
     align-items: center;
-    gap: 6px;
+    gap: 0;
     margin: 0 !important;
     white-space: nowrap;
+    overflow: hidden;
+    border: 1px solid var(--SmartThemeBorderColor, #666);
+    border-radius: 8px;
+}
+
+.story-rewriter-change-decision button {
+    min-width: max-content;
+    padding: 6px 9px;
+    color: inherit;
+    background: transparent;
+    border: 0;
     cursor: pointer;
+    white-space: nowrap;
+}
+
+.story-rewriter-change-decision button + button {
+    border-left: 1px solid var(--SmartThemeBorderColor, #666);
+}
+
+.story-rewriter-change-decision button.is-active {
+    color: #fff;
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor, #5aa8df) 44%, transparent);
 }
 
 .story-rewriter-diff-pair {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     gap: 8px;
-    margin-top: 7px;
+    margin-top: 10px;
 }
 
-.story-rewriter-diff-pair > div {
+.story-rewriter-panel.is-review-side .story-rewriter-diff-pair {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.story-rewriter-diff-pair > * {
     min-width: 0;
+}
+
+.story-rewriter-diff-version {
+    box-sizing: border-box;
+    padding: 9px 10px;
+    background: rgb(0 0 0 / 13%);
+    border: 1px solid rgb(255 255 255 / 7%);
+    border-radius: 7px;
+}
+
+.story-rewriter-diff-version.is-candidate {
+    background: rgb(86 194 113 / 7%);
+}
+
+.story-rewriter-diff-version summary {
+    margin: 0 !important;
+    cursor: pointer;
 }
 
 .story-rewriter-diff-caption {
@@ -444,13 +561,12 @@
 }
 
 .story-rewriter-diff-card pre {
-    max-height: 15em;
     margin: 6px 0 0;
-    overflow: auto;
-    padding: 7px;
+    overflow: visible;
+    padding: 8px;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    background: rgb(0 0 0 / 14%);
+    background: rgb(0 0 0 / 11%);
     border-radius: 4px;
     font: inherit;
 }
@@ -496,7 +612,18 @@
     cursor: pointer;
 }
 
-.story-rewriter-close:hover {
+.story-rewriter-maximize {
+    width: 34px;
+    height: 34px;
+    color: inherit;
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.story-rewriter-close:hover,
+.story-rewriter-maximize:hover {
     background: rgb(255 255 255 / 10%);
 }
 
@@ -511,6 +638,13 @@
 .story-rewriter-actions button:disabled {
     cursor: not-allowed;
     opacity: 0.45;
+}
+
+.story-rewriter-actions .menu_button {
+    width: auto;
+    min-width: max-content;
+    writing-mode: horizontal-tb;
+    white-space: nowrap;
 }
 
 .story-rewriter-status {
@@ -557,7 +691,10 @@
     .story-rewriter-resize-handle { display: none; }
     .story-rewriter-review-toolbar { position: static; align-items: flex-start; flex-direction: column; }
     .story-rewriter-review-actions { justify-content: flex-start; }
-    .story-rewriter-diff-pair { grid-template-columns: 1fr; }
+    .story-rewriter-panel.is-review-side .story-rewriter-diff-pair { grid-template-columns: 1fr; }
+    .story-rewriter-maximize { display: none; }
+    .story-rewriter-review-actions { max-width: none; justify-content: flex-start; }
+    .story-rewriter-diff-heading { flex-direction: column; }
     .story-rewriter-panel:not(.is-selection-scope) .story-rewriter-candidate { min-height: 55vh; }
     .story-rewriter-action span { display: none; }
     .story-rewriter-action button { min-width: 36px; justify-content: center; }
