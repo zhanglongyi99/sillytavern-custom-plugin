@@ -8,11 +8,13 @@ import {
     REPLACEMENT_JSON_SCHEMA,
 } from './lib/rewrite.js';
 import {
+    assessRevisionEffect,
     assessRevisionCompleteness,
     auditRevision,
     buildImpactPrompt,
     buildRevisionContinuationPrompt,
     buildRevisionCoverageRepairPrompt,
+    buildRevisionNoChangeRetryPrompt,
     buildRevisionPrompt,
     classifyRevisionDisposition,
     compactSelectedText,
@@ -26,11 +28,13 @@ import {
     getFocusParagraphIds,
     IMPACT_JSON_SCHEMA,
     IMPACT_LEVELS,
+    mapParagraphIdsToRevision,
     mergeRevisionContinuation,
     parseImpactResponse,
     parseRevisionProviderResponse,
     retrieveReferences,
     resolveRevisionHistory,
+    revisionTextsEquivalent,
     REVISION_BODY_MARKER,
     segmentMessage,
     validateImpactPlan,
@@ -53,7 +57,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.7.5';
+const EXTENSION_VERSION = '0.7.6';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -266,6 +270,10 @@ function generationLog(event, metadata = {}, session = state.session) {
         'errorCode', 'stopReason', 'parseOutcome', 'coverageRatio',
         'retrievalItems', 'retrievalCharacters', 'contextLimit', 'responseLimit',
         'limitSource', 'outcome', 'baseMode', 'disposition',
+        'baselineFingerprint', 'candidateFingerprint', 'equivalent',
+        'effectiveChange', 'similarity', 'changedCharacters',
+        'focusChanges', 'plannedChanges', 'protectedChanges',
+        'retryAttempt', 'retryReason',
     ];
     const safe = Object.fromEntries(allowed
         .filter(key => metadata[key] !== undefined)
@@ -785,6 +793,8 @@ function renderSessionTurns(panel) {
                     state.session.reviewPlan = cloneValue(turn.impactPlan);
                     renderImpactPlan(panel);
                 }
+                state.session.reviewBaseline = String(turn.baseline ?? state.session.capture.messageText);
+                state.session.generationBaseline = state.session.reviewBaseline;
                 state.session.generationIncomplete = Boolean(turn.generationIncomplete);
                 state.session.generationIncompleteReason = String(turn.generationIncompleteReason ?? '');
                 state.session.generationSegments = Number(turn.generationSegments) || 1;
@@ -820,6 +830,8 @@ function captureCandidateSnapshot(session) {
         impactPlan: session.impactPlan ? cloneValue(session.impactPlan) : null,
         reviewPlan: session.reviewPlan ? cloneValue(session.reviewPlan) : null,
         repository: session.repository ? cloneValue(session.repository) : null,
+        reviewBaseline: session.reviewBaseline,
+        generationBaseline: session.generationBaseline,
         generationIncomplete: session.generationIncomplete,
         generationIncompleteReason: session.generationIncompleteReason,
         generationSegments: session.generationSegments,
@@ -834,6 +846,8 @@ function restoreCandidateSnapshot(panel) {
     session.impactPlan = snapshot.impactPlan;
     session.reviewPlan = snapshot.reviewPlan;
     session.repository = snapshot.repository;
+    session.reviewBaseline = snapshot.reviewBaseline;
+    session.generationBaseline = snapshot.generationBaseline;
     session.generationIncomplete = snapshot.generationIncomplete;
     session.generationIncompleteReason = snapshot.generationIncompleteReason;
     session.generationSegments = snapshot.generationSegments;
@@ -870,6 +884,8 @@ function loadFailedAttempt(panel, attempt) {
     const session = state.session;
     session.impactPlan = cloneValue(attempt.impactPlan);
     session.reviewPlan = cloneValue(attempt.impactPlan);
+    session.reviewBaseline = String(attempt.baseline ?? session.capture.messageText);
+    session.generationBaseline = session.reviewBaseline;
     session.generationIncomplete = true;
     session.generationIncompleteReason = attempt.reason;
     session.generationSegments = attempt.segments;
@@ -927,6 +943,7 @@ function recordFailedAttempt(panel, candidate, instruction, metadata = {}) {
         baseMode: metadata.baseMode || session.pendingBaseMode || 'original',
         segments: Number(metadata.segments) || 1,
         impactPlan: cloneValue(session.impactPlan),
+        baseline: String(metadata.baseline ?? session.generationBaseline ?? session.capture.messageText),
         createdAt: new Date().toISOString(),
     });
     session.failedAttempts = session.failedAttempts.slice(-MAX_FAILED_ATTEMPTS);
@@ -935,7 +952,7 @@ function recordFailedAttempt(panel, candidate, instruction, metadata = {}) {
         coverageRatio: metadata.coverageRatio,
         usableCharacters: text.length,
         baseMode: metadata.baseMode || session.pendingBaseMode || 'original',
-        disposition: 'failed_coverage',
+        disposition: metadata.disposition || 'failed_coverage',
     }, session);
     restoreCandidateSnapshot(panel);
     renderFailedAttempts(panel);
@@ -989,6 +1006,8 @@ function resetSessionForScopeChange(panel) {
     session.repository = null;
     session.impactPlan = null;
     session.reviewPlan = null;
+    session.reviewBaseline = session.capture.messageText;
+    session.generationBaseline = session.capture.messageText;
     session.audit = null;
     session.pendingTask = null;
     session.pendingInstruction = '';
@@ -1041,7 +1060,7 @@ function buildSessionTask(instruction, panel) {
         ...task,
         constraints: panel.querySelector('.story-rewriter-constraints').value.trim(),
         previousCandidate: panel.querySelector('.story-rewriter-candidate').value.trim() || state.session.candidate,
-        previousInstructions: state.session.requirements.slice(-MAX_SESSION_TURNS),
+        previousInstructions: [],
     };
 }
 
@@ -1068,11 +1087,18 @@ async function generatePreciseCandidate(panel) {
     try {
         await syncContextSummary(panel);
         const task = buildSessionTask(instruction, panel);
-        const requestReplacement = async useSchema => {
+        const requestReplacement = async (useSchema, effectRetry = false) => {
             const fallbackContract = useSchema ? '' : '\n\n当前后端可能不支持 JSON Schema。只在 <story_rewriter_replacement_begin> 和 <story_rewriter_replacement_end> 之间输出替换正文，不要 JSON、解释或代码围栏。';
+            const effectContract = effectRetry ? [
+                '',
+                '<story_rewriter_effect_retry>',
+                '上一次替换与本轮开始前的工作稿相同，没有执行用户要求。重新生成一份真正不同的替换文本。',
+                '必须在选区内容中产生与本轮 instruction 对应的实质变化；原样复制 previousDraft 或 target.selection 视为失败。不要只改空格或换行。',
+                '</story_rewriter_effect_retry>',
+            ].join('\n') : '';
             const pluginPrompt = session.contextMode === 'tavern'
-                ? `${buildFullContextRewritePrompt(task)}${fallbackContract}`
-                : `${buildRewritePrompt(task)}${fallbackContract}`;
+                ? `${buildFullContextRewritePrompt(task)}${fallbackContract}${effectContract}`
+                : `${buildRewritePrompt(task)}${fallbackContract}${effectContract}`;
             const promptTokens = await countTokens(pluginPrompt);
             return runGenerationCall(session, '局部替换', () => {
                 if (session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function') {
@@ -1096,6 +1122,7 @@ async function generatePreciseCandidate(panel) {
                 });
             }, {
                 attempt: useSchema ? 1 : 2,
+                retryAttempt: effectRetry ? 1 : 0,
                 responseLength: state.settings.responseLength,
                 promptTokens,
                 pluginPromptCharacters: pluginPrompt.length,
@@ -1112,6 +1139,37 @@ async function generatePreciseCandidate(panel) {
             candidate = cleanModelResponse(removeConfiguredReasoning(response));
         }
         if (!candidate) throw new Error('模型返回了空内容。');
+        const baseline = task.previousCandidate || task.selection;
+        let equivalent = revisionTextsEquivalent(baseline, candidate);
+        generationLog('revision_effect', {
+            stage: '局部替换',
+            baselineFingerprint: hashText(baseline),
+            candidateFingerprint: hashText(candidate),
+            equivalent,
+            effectiveChange: !equivalent,
+            retryAttempt: 0,
+        }, session);
+        if (equivalent) {
+            panel.querySelector('.story-rewriter-status').textContent = '模型返回了与当前选区相同的内容，正在强化修改要求后重试…';
+            response = await requestReplacement(true, true);
+            if (session.cancelled) throw new GenerationCancelledError();
+            candidate = cleanModelResponse(removeConfiguredReasoning(response));
+            equivalent = candidate ? revisionTextsEquivalent(baseline, candidate) : true;
+            generationLog('revision_effect', {
+                stage: '局部替换',
+                baselineFingerprint: hashText(baseline),
+                candidateFingerprint: hashText(candidate),
+                equivalent,
+                effectiveChange: Boolean(candidate) && !equivalent,
+                retryAttempt: 1,
+                retryReason: '候选与本轮工作稿相同',
+            }, session);
+            if (!candidate || equivalent) {
+                panel.querySelector('.story-rewriter-status').textContent = '模型连续两次没有执行本轮修改，当前有效候选保持不变。请调整要求后重试。';
+                diagnosticStatus = 'rejected_no_effect';
+                return;
+            }
+        }
         if (state.session !== session || !panel.isConnected) {
             diagnosticStatus = 'superseded';
             return;
@@ -1212,12 +1270,12 @@ async function buildSemanticRepository(session, instruction, constraints) {
         instruction,
         session.capture.selectedText,
         constraints,
-        ...session.requirements.slice(-3),
     ].filter(Boolean).join('\n');
-    const originalTokens = await countTokens(session.capture.messageText);
+    const baseline = session.generationBaseline || session.capture.messageText;
+    const originalTokens = await countTokens(baseline);
     const desiredOutput = desiredRevisionTokens(originalTokens);
     const maxContext = limits.maxContext;
-    const baseTokens = await countTokens([session.capture.messageText, instruction, constraints].join('\n')) + 1800;
+    const baseTokens = await countTokens([baseline, instruction, constraints].join('\n')) + 1800;
     const availableRetrievalTokens = maxContext ? maxContext - baseTokens - desiredOutput : Number.POSITIVE_INFINITY;
     const contextCharacterBudget = Number.isFinite(availableRetrievalTokens)
         ? Math.max(0, Math.floor(availableRetrievalTokens * 2))
@@ -1341,8 +1399,26 @@ function getSessionReviewPlan(session) {
     return getEffectiveImpactPlan(session.reviewPlan ?? session.impactPlan);
 }
 
+function logRevisionEffectAssessment(session, baseline, candidate, assessment, metadata = {}) {
+    generationLog('revision_effect', {
+        stage: metadata.stage || session.activeRevisionStage || '完整正文',
+        baselineFingerprint: hashText(String(baseline ?? '')),
+        candidateFingerprint: hashText(String(candidate ?? '')),
+        equivalent: assessment.equivalent,
+        effectiveChange: assessment.effective,
+        similarity: assessment.similarity,
+        changedCharacters: assessment.changedCharacters,
+        focusChanges: assessment.focusChanges,
+        plannedChanges: assessment.plannedChanges,
+        protectedChanges: assessment.protectedChanges,
+        retryAttempt: metadata.retryAttempt,
+        retryReason: metadata.retryReason,
+    }, session);
+}
+
 function createCandidateAudit(session, candidate) {
-    const audit = auditRevision(session.capture.messageText, candidate, getSessionReviewPlan(session));
+    const baseline = session.reviewBaseline || session.capture.messageText;
+    const audit = auditRevision(baseline, candidate, getSessionReviewPlan(session));
     if (session.generationIncomplete) {
         audit.conflicts.unshift(session.generationIncompleteReason
             || '完整正文未通过完整性检查。请检查文章结尾；你仍可编辑或确认应用。');
@@ -1554,7 +1630,7 @@ function composeReviewCandidate(panel) {
     const session = state.session;
     if (!session?.proposalCandidate || !session.reviewAudit) return;
     const candidate = composeRevisionFromDecisions(
-        session.capture.messageText,
+        session.reviewBaseline || session.capture.messageText,
         session.proposalCandidate,
         session.acceptedChangeIds,
         session.reviewAudit.alignment,
@@ -1757,6 +1833,7 @@ function auditCurrentCandidate(panel, { rebuildReview = false } = {}) {
 function showCandidate(panel, candidate, instruction, metadata = {}) {
     const session = state.session;
     const baseMode = metadata.baseMode || session.pendingBaseMode || 'original';
+    const baseline = String(metadata.baseline ?? session.generationBaseline ?? session.capture.messageText);
     if (baseMode === 'original') {
         session.requirements = [];
         session.turns = [];
@@ -1768,6 +1845,8 @@ function showCandidate(panel, candidate, instruction, metadata = {}) {
     panel.querySelector('.story-rewriter-generate').hidden = false;
     panel.querySelector('.story-rewriter-apply').disabled = false;
     panel.querySelector('.story-rewriter-replace').disabled = false;
+    session.reviewBaseline = baseline;
+    session.generationBaseline = baseline;
     session.reviewPlan = cloneValue(session.impactPlan);
     initializeCandidateReview(panel, candidate);
     const actualCandidate = session.candidate;
@@ -1779,6 +1858,7 @@ function showCandidate(panel, candidate, instruction, metadata = {}) {
         rawCandidate: candidate,
         sourceStage: metadata.sourceStage || session.activeRevisionStage || '完整正文',
         baseMode,
+        baseline,
         impactPlan: cloneValue(session.impactPlan),
         generationIncomplete: session.generationIncomplete,
         generationIncompleteReason: session.generationIncompleteReason,
@@ -1836,13 +1916,14 @@ async function generateCompleteRevision(panel, instruction) {
     const task = session.pendingTask;
     const effectivePlan = getEffectiveImpactPlan(session.impactPlan);
     const baseMode = session.pendingBaseMode || 'original';
+    const baseline = session.generationBaseline || session.capture.messageText;
     setWorkspaceBusy(panel, true, '正在生成完整候选稿…', { cancelable: true });
     let diagnosticStatus = 'failed';
     try {
         const limits = session.activeLimits ?? await getActiveGenerationLimits();
         session.activeLimits = limits;
         updateContextSummary(panel);
-        const originalTokens = await countTokens(session.capture.messageText);
+        const originalTokens = await countTokens(baseline);
         const desiredResponseLength = desiredRevisionTokens(originalTokens);
         const revisionHistory = resolveRevisionHistory(
             baseMode,
@@ -1950,7 +2031,7 @@ async function generateCompleteRevision(panel, instruction) {
         };
 
         let result = await runRevision(buildRevisionPrompt(revisionTask), '初稿');
-        let coverage = assessRevisionCompleteness(session.capture.messageText, result.assembled, effectivePlan);
+        let coverage = assessRevisionCompleteness(baseline, result.assembled, effectivePlan);
         generationLog('coverage', {
             stage: '初稿',
             coverageRatio: coverage.lengthRatio,
@@ -1963,7 +2044,7 @@ async function generateCompleteRevision(panel, instruction) {
             session.coverageRepairReason = `初稿只覆盖原文约 ${Math.round(coverage.lengthRatio * 100)}%`;
             panel.querySelector('.story-rewriter-status').textContent = `${session.coverageRepairReason}，正在进行完整性修复…`;
             const repaired = await runRevision(buildRevisionCoverageRepairPrompt(revisionTask, coverage), '完整性修复');
-            const repairedCoverage = assessRevisionCompleteness(session.capture.messageText, repaired.assembled, effectivePlan);
+            const repairedCoverage = assessRevisionCompleteness(baseline, repaired.assembled, effectivePlan);
             generationLog('coverage', {
                 stage: '完整性修复',
                 coverageRatio: repairedCoverage.lengthRatio,
@@ -1981,6 +2062,43 @@ async function generateCompleteRevision(panel, instruction) {
                 coverage = initialCoverage;
                 session.coverageRepairReason += '；完整性修复返回的内容更少，因此继续保留初稿';
             }
+        }
+        let effect = assessRevisionEffect(baseline, result.assembled, effectivePlan);
+        logRevisionEffectAssessment(session, baseline, result.assembled, effect, { stage: result.sourceStage, retryAttempt: 0 });
+        if (!effect.effective) {
+            panel.querySelector('.story-rewriter-status').textContent = `${effect.reason || '本轮没有产生有效修改'}，正在强化本轮要求后重试…`;
+            const retried = await runRevision(buildRevisionNoChangeRetryPrompt(revisionTask, effect), '有效修改修复');
+            const retriedCoverage = assessRevisionCompleteness(baseline, retried.assembled, effectivePlan);
+            const retriedEffect = assessRevisionEffect(baseline, retried.assembled, effectivePlan);
+            logRevisionEffectAssessment(session, baseline, retried.assembled, retriedEffect, {
+                stage: retried.sourceStage,
+                retryAttempt: 1,
+                retryReason: effect.reason,
+            });
+            generationLog('coverage', {
+                stage: retried.sourceStage,
+                coverageRatio: retriedCoverage.lengthRatio,
+                complete: retriedCoverage.complete,
+                usableCharacters: retriedCoverage.candidateCharacters,
+            }, session);
+            if (!retriedEffect.effective) {
+                recordFailedAttempt(panel, retried.assembled || result.assembled, instruction, {
+                    reason: `模型连续两次没有执行本轮修改：${retriedEffect.reason || effect.reason || '重点区域没有产生实质变化'}。`,
+                    sourceStage: retried.sourceStage,
+                    baseMode,
+                    baseline,
+                    segments: retried.segments,
+                    coverageRatio: retriedCoverage.lengthRatio,
+                    disposition: 'failed_no_effect',
+                });
+                session.pendingTask = null;
+                session.pendingInstruction = '';
+                diagnosticStatus = 'rejected_no_effect';
+                return;
+            }
+            result = retried;
+            coverage = retriedCoverage;
+            effect = retriedEffect;
         }
         if (!result.assembled) throw new Error('模型没有返回可用的完整候选正文。');
         if (state.session !== session || !panel.isConnected) {
@@ -2005,6 +2123,7 @@ async function generateCompleteRevision(panel, instruction) {
                 reason: session.generationIncompleteReason,
                 sourceStage: result.sourceStage,
                 baseMode,
+                baseline,
                 segments: result.segments,
                 coverageRatio: coverage.lengthRatio,
             });
@@ -2016,6 +2135,7 @@ async function generateCompleteRevision(panel, instruction) {
         showCandidate(panel, result.assembled, instruction, {
             sourceStage: result.sourceStage,
             baseMode,
+            baseline,
         });
         generationLog('candidate_accepted', {
             stage: result.sourceStage,
@@ -2023,6 +2143,12 @@ async function generateCompleteRevision(panel, instruction) {
             usableCharacters: result.assembled.length,
             baseMode,
             disposition,
+            baselineFingerprint: hashText(baseline),
+            candidateFingerprint: hashText(result.assembled),
+            effectiveChange: effect.effective,
+            changedCharacters: effect.changedCharacters,
+            focusChanges: effect.focusChanges,
+            plannedChanges: effect.plannedChanges,
         }, session);
         session.pendingTask = null;
         session.pendingInstruction = '';
@@ -2034,23 +2160,33 @@ async function generateCompleteRevision(panel, instruction) {
             : isGenerationTimeout(error) ? 'timeout' : 'failed';
         const partial = String(session.partialCandidate ?? '').trim();
         if (partial && state.session === session && panel.isConnected) {
-            const partialCoverage = assessRevisionCompleteness(session.capture.messageText, partial, effectivePlan);
+            const partialCoverage = assessRevisionCompleteness(baseline, partial, effectivePlan);
+            const partialEffect = assessRevisionEffect(baseline, partial, effectivePlan);
+            logRevisionEffectAssessment(session, baseline, partial, partialEffect, {
+                stage: session.partialStage,
+                retryReason: 'generation_interrupted',
+            });
             session.generationIncomplete = true;
             session.generationIncompleteReason = describePartialRecovery(error, session);
             session.generationSegments = session.partialSegments;
             const disposition = classifyRevisionDisposition(partial, false, partialCoverage);
-            if (disposition === 'failed_coverage') {
+            if (disposition === 'failed_coverage' || !partialEffect.effective) {
                 recordFailedAttempt(panel, partial, instruction, {
-                    reason: session.generationIncompleteReason,
+                    reason: !partialEffect.effective
+                        ? `${session.generationIncompleteReason}；${partialEffect.reason || '中断前候选未产生有效修改'}`
+                        : session.generationIncompleteReason,
                     sourceStage: session.partialStage,
                     baseMode,
+                    baseline,
                     segments: session.partialSegments,
                     coverageRatio: partialCoverage.lengthRatio,
+                    disposition: !partialEffect.effective ? 'failed_no_effect' : disposition,
                 });
             } else {
                 showCandidate(panel, partial, instruction, {
                     sourceStage: session.partialStage,
                     baseMode,
+                    baseline,
                 });
                 generationLog('candidate_accepted', {
                     stage: session.partialStage,
@@ -2058,6 +2194,12 @@ async function generateCompleteRevision(panel, instruction) {
                     usableCharacters: partial.length,
                     baseMode,
                     disposition,
+                    baselineFingerprint: hashText(baseline),
+                    candidateFingerprint: hashText(partial),
+                    effectiveChange: partialEffect.effective,
+                    changedCharacters: partialEffect.changedCharacters,
+                    focusChanges: partialEffect.focusChanges,
+                    plannedChanges: partialEffect.plannedChanges,
                 }, session);
             }
             session.pendingTask = null;
@@ -2096,16 +2238,27 @@ async function generateSemanticCandidate(panel) {
     const constraints = panel.querySelector('.story-rewriter-constraints').value.trim();
     const fellBack = applyAutomaticContextFallback(panel);
     session.pendingBaseMode = getGenerationBasis(panel);
+    const currentCandidate = panel.querySelector('.story-rewriter-candidate').value.trim() || session.candidate;
+    session.generationBaseline = session.pendingBaseMode === 'current' && currentCandidate
+        ? currentCandidate
+        : session.capture.messageText;
     captureCandidateSnapshot(session);
     startGenerationSession(session);
     setWorkspaceBusy(panel, true, fellBack ? '完整上下文接口不可用，已降级并建立故事资料视图…' : '正在建立故事资料视图…', { cancelable: true });
     try {
         const limits = await syncContextSummary(panel);
-        const paragraphs = segmentMessage(session.capture.messageText);
+        const baseline = session.generationBaseline;
+        const paragraphs = segmentMessage(baseline);
+        const sourceParagraphs = segmentMessage(session.capture.messageText);
+        const sourceFocusIds = session.editMode === 'full'
+            ? []
+            : getFocusParagraphIds(sourceParagraphs, session.capture.range, session.editMode);
         const focusIds = session.editMode === 'full'
             ? []
-            : getFocusParagraphIds(paragraphs, session.capture.range, session.editMode);
-        if (session.editMode !== 'full' && !focusIds.length) throw new Error('无法把选区映射到原文段落。');
+            : baseline === session.capture.messageText
+                ? sourceFocusIds
+                : mapParagraphIdsToRevision(session.capture.messageText, baseline, sourceFocusIds);
+        if (session.editMode !== 'full' && !sourceFocusIds.length) throw new Error('无法把选区映射到原文段落。');
         const repository = await buildSemanticRepository(session, instruction, constraints);
         if (session.cancelled) throw new GenerationCancelledError();
         session.repository = repository;
@@ -2136,8 +2289,10 @@ async function generateSemanticCandidate(panel) {
             influence: session.influence,
             instruction,
             constraints,
-            originalMessage: session.capture.messageText,
-            selectedText: focusIds.length ? compactSelectedText(session.capture.selectedText) : '',
+            originalMessage: baseline,
+            selectedText: focusIds.length
+                ? compactSelectedText(paragraphs.filter(paragraph => focusIds.includes(paragraph.id)).map(paragraph => paragraph.text).join('\n\n'))
+                : '',
             paragraphs,
             focusIds,
             references: [...mandatoryReferences, ...repository.retrieval.items],
@@ -2171,6 +2326,13 @@ async function generateSemanticCandidate(panel) {
         let plan = validateImpactPlan(rawPlan, paragraphs, focusIds, task.references.map(item => item.id));
         plan.fallback = Boolean(rawPlan.fallback);
         plan.fallbackReason = fallbackReason;
+        if (!plan.focusRegions.length && session.editMode === 'full') {
+            plan = {
+                ...createConservativeImpactPlan(paragraphs, [], instruction, 'full'),
+                fallback: true,
+                fallbackReason: fallbackReason || '模型没有识别出任何重点区域，已将整条回复作为本轮可修改范围。',
+            };
+        }
         if (session.influence === 'strict') {
             plan = constrainImpactPlan(plan, paragraphs, { maxLinked: 4, maxTransition: 2 });
         }
@@ -2180,7 +2342,7 @@ async function generateSemanticCandidate(panel) {
         renderImpactPlan(panel);
         renderReferences(panel);
         if (plan.fallback) {
-            panel.querySelector('.story-rewriter-status').textContent = `已使用本地保守范围继续生成；请在逐块确认中检查。${fallbackReason ? ` 原因：${fallbackReason}` : ''}`;
+            panel.querySelector('.story-rewriter-status').textContent = `已使用本地保守范围继续生成；请在逐块确认中检查。${plan.fallbackReason ? ` 原因：${plan.fallbackReason}` : ''}`;
         }
     } catch (error) {
         console.error('[Story Rewriter] impact analysis failed', error);
@@ -2482,6 +2644,8 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
         repository: null,
         impactPlan: null,
         reviewPlan: null,
+        reviewBaseline: capture.messageText,
+        generationBaseline: capture.messageText,
         audit: null,
         pendingTask: null,
         pendingInstruction: '',

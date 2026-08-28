@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+    assessRevisionEffect,
     assessRevisionCompleteness,
     auditRevision,
     buildImpactPrompt,
     buildRevisionContinuationPrompt,
     buildRevisionCoverageRepairPrompt,
+    buildRevisionNoChangeRetryPrompt,
     buildRevisionPrompt,
     buildChangedBlocks,
     classifyRevisionDisposition,
@@ -20,6 +22,7 @@ import {
     estimateTokenCount,
     getFocusParagraphIds,
     IMPACT_JSON_SCHEMA,
+    mapParagraphIdsToRevision,
     mergeRevisionContinuation,
     parseImpactResponse,
     parseRevisionProviderResponse,
@@ -28,19 +31,68 @@ import {
     REVISION_END_MARKER,
     retrieveReferences,
     resolveRevisionHistory,
+    revisionTextsEquivalent,
     segmentMessage,
     validateImpactPlan,
 } from '../lib/semantic.js';
 
-test('starts an independent task without carrying prior drafts or requirements', () => {
+test('promotes the chosen draft to the editing baseline without duplicating stale requirements', () => {
     assert.deepEqual(resolveRevisionHistory('original', '旧候选', ['旧要求']), {
         previousCandidate: '',
         previousInstructions: [],
     });
     assert.deepEqual(resolveRevisionHistory('current', '当前候选', ['继续克制一点']), {
-        previousCandidate: '当前候选',
-        previousInstructions: ['继续克制一点'],
+        previousCandidate: '',
+        previousInstructions: [],
     });
+});
+
+test('rejects unchanged drafts and changes that miss the planned focus region', () => {
+    const baseline = '目标段保持原样。\n\n保护段保持原样。';
+    const plan = {
+        focusRegions: [{ paragraphId: 'P001' }],
+        linkedRegions: [],
+        transitionRegions: [],
+        protectedFacts: [],
+    };
+    const unchanged = assessRevisionEffect(baseline, `目标段保持原样。\n \n保护段保持原样。`, plan);
+    assert.equal(unchanged.effective, false);
+    assert.equal(unchanged.equivalent, true);
+    assert.match(unchanged.reason, /相同/);
+
+    const wrongRegion = assessRevisionEffect(baseline, '目标段保持原样。\n\n保护段被偷偷改了。', plan);
+    assert.equal(wrongRegion.effective, false);
+    assert.equal(wrongRegion.focusChanges, 0);
+    assert.equal(wrongRegion.protectedChanges, 1);
+
+    const focused = assessRevisionEffect(baseline, '目标段已经重新设计。\n\n保护段保持原样。', plan);
+    assert.equal(focused.effective, true);
+    assert.equal(focused.focusChanges, 1);
+    assert.equal(revisionTextsEquivalent('Ａ  B', 'A B'), true);
+});
+
+test('maps a selected source paragraph onto an expanded current draft', () => {
+    const source = '开场。\n\n原目标段。\n\n结尾。';
+    const current = '开场。\n\n目标段上半。\n\n目标段下半。\n\n结尾。';
+    assert.deepEqual(mapParagraphIdsToRevision(source, current, ['P002']), ['P002', 'P003']);
+});
+
+test('builds a focused retry contract when a full draft makes no effective change', () => {
+    const prompt = buildRevisionNoChangeRetryPrompt({
+        editMode: 'semantic',
+        influence: 'semantic',
+        instruction: '重新构思选项',
+        constraints: '',
+        originalMessage: '旧选项。',
+        selectedText: '旧选项。',
+        focusIds: ['P001'],
+        impactPlan: { focusRegions: [{ paragraphId: 'P001' }], linkedRegions: [], transitionRegions: [], protectedFacts: [] },
+        previousCandidate: '',
+        references: [],
+    }, { focusChanges: 0, plannedChanges: 0 });
+    assert.match(prompt, /没有完成本轮编辑/);
+    assert.match(prompt, /原样复制.*任务失败|不得原样复制/);
+    assert.match(prompt, /重新执行本轮 instruction/);
 });
 
 test('quarantines low-coverage fragments but keeps full drafts with a missing boundary reviewable', () => {

@@ -35,6 +35,21 @@ test('keeps only privacy-safe diagnostic fields and builds summaries', () => {
         parseOutcome: 'body_protocol',
         content: 'secret story',
     }, '2026-08-28T00:00:02.000Z');
+    archive = appendDiagnosticEvent(archive, 'run-1', 'revision_effect', {
+        baselineFingerprint: 'hash-a',
+        candidateFingerprint: 'hash-b',
+        equivalent: false,
+        effectiveChange: true,
+        similarity: 0.72,
+        changedCharacters: 180,
+        focusChanges: 2,
+        plannedChanges: 3,
+        protectedChanges: 0,
+        retryAttempt: 1,
+        retryReason: 'same draft',
+        baselineText: 'secret baseline',
+        candidateText: 'secret candidate',
+    }, '2026-08-28T00:00:02.500Z');
     archive = finishDiagnosticRun(archive, 'run-1', 'completed', '2026-08-28T00:00:03.000Z');
 
     const serialized = JSON.stringify(exportDiagnosticArchive(archive, '2026-08-28T00:00:04.000Z'));
@@ -44,6 +59,9 @@ test('keeps only privacy-safe diagnostic fields and builds summaries', () => {
     assert.equal(archive.runs[0].summary.parseOutcomes.body_protocol, 1);
     assert.equal(archive.runs[0].events[1].baseMode, 'original');
     assert.equal(archive.runs[0].events[1].disposition, 'failed_coverage');
+    assert.equal(archive.runs[0].events[2].baselineFingerprint, 'hash-a');
+    assert.equal(archive.runs[0].events[2].focusChanges, 2);
+    assert.equal(archive.runs[0].events[2].baselineText, undefined);
     assert.equal(archive.runs[0].status, 'completed');
 });
 

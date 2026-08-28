@@ -131,6 +131,16 @@ test('separates independent tasks, valid turns, and quarantined failed attempts'
     assert.match(styles, /\.story-rewriter-turn\.is-failed/);
 });
 
+test('treats each iteration as a real edit against its current baseline', () => {
+    assert.match(runtime, /session\.generationBaseline = session\.pendingBaseMode === 'current'/);
+    assert.match(runtime, /mapParagraphIdsToRevision/);
+    assert.match(runtime, /assessRevisionEffect\(baseline, result\.assembled, effectivePlan\)/);
+    assert.match(runtime, /buildRevisionNoChangeRetryPrompt/);
+    assert.match(runtime, /模型连续两次没有执行本轮修改/);
+    assert.match(runtime, /session\.reviewBaseline \|\| session\.capture\.messageText/);
+    assert.match(runtime, /baselineFingerprint/);
+});
+
 test('supports block-level acceptance and a long-text review workspace', () => {
     assert.match(runtime, />逐块确认</);
     assert.match(runtime, /仅采用计划内/);

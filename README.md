@@ -2,7 +2,7 @@
 
 一个可通过 Git URL 安装的 SillyTavern 前端扩展。用户只需要指出问题位置并描述修改目标，插件会结合酒馆完整上下文生成一个保留原版本的新版本。
 
-> 当前版本：`0.7.5`。建议先在非关键聊天中试用，并为重要聊天保留备份。模型、预设与世界书兼容设计参见 [v0.6 通用性重构](docs/V0.6_PORTABILITY_REFACTOR.md)，续接恢复机制参见 [v0.6.1 设计](docs/V0.6.1_CONTINUATION_RECOVERY.md)，推理通道兼容参见 [v0.6.2 设计](docs/V0.6.2_REASONING_SAFE_RECOVERY.md)，本地诊断记录参见 [v0.6.3 设计](docs/V0.6.3_DIAGNOSTIC_LOGGING.md)，长文本对照重构参见 [v0.7 设计](docs/V0.7_REVIEW_ALIGNMENT_REDESIGN.md)，表格选区修复参见 [v0.7.1 说明](docs/V0.7.1_TABLE_SELECTION_FIX.md)，候选状态重构参见 [v0.7.2 设计](docs/V0.7.2_CANDIDATE_LIFECYCLE.md)，跨页拖选恢复参见 [v0.7.3 说明](docs/V0.7.3_SELECTION_SETTLE_RECOVERY.md)，表格结构空白兼容参见 [v0.7.4 说明](docs/V0.7.4_TABLE_RANGE_FALLBACK.md)，水平分隔线兼容参见 [v0.7.5 说明](docs/V0.7.5_THEMATIC_BREAK_SELECTION.md)。
+> 当前版本：`0.7.6`。建议先在非关键聊天中试用，并为重要聊天保留备份。模型、预设与世界书兼容设计参见 [v0.6 通用性重构](docs/V0.6_PORTABILITY_REFACTOR.md)，续接恢复机制参见 [v0.6.1 设计](docs/V0.6.1_CONTINUATION_RECOVERY.md)，推理通道兼容参见 [v0.6.2 设计](docs/V0.6.2_REASONING_SAFE_RECOVERY.md)，本地诊断记录参见 [v0.6.3 设计](docs/V0.6.3_DIAGNOSTIC_LOGGING.md)，长文本对照重构参见 [v0.7 设计](docs/V0.7_REVIEW_ALIGNMENT_REDESIGN.md)，表格选区修复参见 [v0.7.1 说明](docs/V0.7.1_TABLE_SELECTION_FIX.md)，候选状态重构参见 [v0.7.2 设计](docs/V0.7.2_CANDIDATE_LIFECYCLE.md)，跨页拖选恢复参见 [v0.7.3 说明](docs/V0.7.3_SELECTION_SETTLE_RECOVERY.md)，表格结构空白兼容参见 [v0.7.4 说明](docs/V0.7.4_TABLE_RANGE_FALLBACK.md)，水平分隔线兼容参见 [v0.7.5 说明](docs/V0.7.5_THEMATIC_BREAK_SELECTION.md)，多轮有效修改校验参见 [v0.7.6 说明](docs/V0.7.6_ITERATION_EFFECT_VALIDATION.md)。
 
 ## 功能
 
@@ -37,6 +37,8 @@
 - 缩短、保持或扩写由影响计划中的统一长度意图控制，不依赖中英文关键词表。
 - 可以填写需要持续遵守的约束，恢复本次会话的旧候选。
 - 已有候选时可明确选择“继续当前版本”或“从原文开始新任务”；后者不会携带旧候选和旧轮次要求。
+- “继续当前版本”会把当前合成稿提升为本轮分析、段落定位、生成和逐块审核的统一基线；不会重复发送已经固化在草稿中的旧轮次要求。
+- 每轮都会验证重点区是否真的发生变化。模型原样返回工作稿、只修改保护区或局部替换与原选区相同时会自动强化重试一次；仍无有效变化则保留上一候选，不会伪装成成功轮次。
 - 严重残缺或只返回分析摘要的正文会进入独立“失败尝试”，不会覆盖当前有效候选或伪装成正常轮次。
 - 正常轮次摘要展示实际可应用的本地合成稿，并标注初稿/完整性修复及任务起点；失败残片只能通过高级风险确认显式载入。
 - 候选可手动修订，并会在保存前重新审计。
