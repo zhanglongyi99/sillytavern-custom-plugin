@@ -286,6 +286,30 @@
     opacity: 0.78;
 }
 
+.story-rewriter-turn.is-failed {
+    border-left-color: #d66b6b;
+    background: rgb(214 107 107 / 7%);
+}
+
+.story-rewriter-failed-attempts {
+    margin-top: 12px;
+    padding: 9px 11px;
+    border: 1px solid color-mix(in srgb, #d66b6b 55%, transparent);
+    border-radius: 8px;
+}
+
+.story-rewriter-failed-attempts > summary {
+    cursor: pointer;
+    font-weight: 700;
+}
+
+.story-rewriter-failed-attempt-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+}
+
 .story-rewriter-restore-candidate {
     margin-top: 3px;
 }
@@ -598,6 +622,43 @@
 
 .story-rewriter-panel-footer > label {
     margin-top: 0;
+}
+
+.story-rewriter-generation-basis {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    margin: 0 0 9px;
+    padding: 8px 10px;
+    border: 1px solid var(--SmartThemeBorderColor, #666);
+    border-radius: 8px;
+}
+
+.story-rewriter-generation-basis legend {
+    padding: 0 5px;
+    font-weight: 700;
+}
+
+.story-rewriter-generation-basis label {
+    display: flex;
+    flex: 1 1 260px;
+    align-items: flex-start;
+    gap: 7px;
+    margin: 0;
+    padding: 7px 9px;
+    cursor: pointer;
+    background: rgb(255 255 255 / 4%);
+    border-radius: 7px;
+}
+
+.story-rewriter-generation-basis label span {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.story-rewriter-generation-basis small {
+    opacity: 0.72;
 }
 
 .story-rewriter-close {

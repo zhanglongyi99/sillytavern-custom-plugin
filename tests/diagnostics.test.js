@@ -28,6 +28,8 @@ test('keeps only privacy-safe diagnostic fields and builds summaries', () => {
     }, '2026-08-28T00:00:01.000Z');
     archive = appendDiagnosticEvent(archive, 'run-1', 'parsed', {
         stage: '初稿',
+        baseMode: 'original',
+        disposition: 'failed_coverage',
         providerCharacters: 1200,
         usableCharacters: 900,
         parseOutcome: 'body_protocol',
@@ -40,6 +42,8 @@ test('keeps only privacy-safe diagnostic fields and builds summaries', () => {
     assert.equal(archive.runs[0].summary.modelCalls, 1);
     assert.equal(archive.runs[0].summary.providerCharacters, 1200);
     assert.equal(archive.runs[0].summary.parseOutcomes.body_protocol, 1);
+    assert.equal(archive.runs[0].events[1].baseMode, 'original');
+    assert.equal(archive.runs[0].events[1].disposition, 'failed_coverage');
     assert.equal(archive.runs[0].status, 'completed');
 });
 

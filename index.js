@@ -14,6 +14,7 @@ import {
     buildRevisionContinuationPrompt,
     buildRevisionCoverageRepairPrompt,
     buildRevisionPrompt,
+    classifyRevisionDisposition,
     compactSelectedText,
     composeRevisionFromDecisions,
     constrainImpactPlan,
@@ -29,6 +30,7 @@ import {
     parseImpactResponse,
     parseRevisionProviderResponse,
     retrieveReferences,
+    resolveRevisionHistory,
     REVISION_BODY_MARKER,
     segmentMessage,
     validateImpactPlan,
@@ -51,14 +53,16 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.7.1';
+const EXTENSION_VERSION = '0.7.2';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
+const MAX_FAILED_ATTEMPTS = 8;
 const MAX_REVISION_SEGMENTS = 8;
 const CONTEXT_MODES = new Set(['tavern', 'local']);
 const EDIT_MODES = new Set(['semantic', 'full']);
 const SCOPE_MODES = new Set(['selection', 'smart']);
+const GENERATION_BASES = new Set(['current', 'original']);
 const DEFAULT_SETTINGS = Object.freeze({
     settingsVersion: 8,
     enabled: true,
@@ -259,7 +263,7 @@ function generationLog(event, metadata = {}, session = state.session) {
         'pluginPromptCharacters', 'pluginPromptFingerprint', 'complete',
         'errorCode', 'stopReason', 'parseOutcome', 'coverageRatio',
         'retrievalItems', 'retrievalCharacters', 'contextLimit', 'responseLimit',
-        'limitSource', 'outcome',
+        'limitSource', 'outcome', 'baseMode', 'disposition',
     ];
     const safe = Object.fromEntries(allowed
         .filter(key => metadata[key] !== undefined)
@@ -702,7 +706,9 @@ function renderSessionTurns(panel) {
         const request = document.createElement('p');
         request.textContent = turn.instruction;
         const resultLabel = document.createElement('strong');
-        resultLabel.textContent = '候选摘要';
+        const stage = turn.sourceStage || '完整正文';
+        const basis = turn.baseMode === 'original' ? '基于原文' : '继续当前版本';
+        resultLabel.textContent = `实际候选摘要 · ${stage} · ${basis}`;
         const result = document.createElement('p');
         result.textContent = turn.candidate.length > 180 ? `${turn.candidate.slice(0, 180)}…` : turn.candidate;
         const restore = document.createElement('button');
@@ -724,15 +730,158 @@ function renderSessionTurns(panel) {
                 state.session.generationIncomplete = Boolean(turn.generationIncomplete);
                 state.session.generationIncompleteReason = String(turn.generationIncompleteReason ?? '');
                 state.session.generationSegments = Number(turn.generationSegments) || 1;
+                state.session.forceLoadedAttemptId = null;
                 initializeCandidateReview(panel, turn.candidate);
                 switchWorkspaceView(panel, 'changes');
             }
+            updateGenerationBasis(panel);
             panel.querySelector('.story-rewriter-status').textContent = `已恢复第 ${index + 1} 轮候选并重新审计。`;
         });
         card.append(requestLabel, request, resultLabel, result, restore);
         host.append(card);
     }
     host.hidden = state.session.turns.length === 0;
+}
+
+function updateGenerationBasis(panel) {
+    const fieldset = panel.querySelector('.story-rewriter-generation-basis');
+    if (!fieldset) return;
+    const hasCandidate = Boolean(panel.querySelector('.story-rewriter-candidate')?.value.trim() || state.session?.candidate);
+    fieldset.hidden = state.session?.scopeMode === 'selection' || !hasCandidate;
+}
+
+function getGenerationBasis(panel) {
+    if (!panel.querySelector('.story-rewriter-candidate')?.value.trim() && !state.session?.candidate) return 'original';
+    const selected = panel.querySelector('input[name="story-rewriter-generation-basis"]:checked')?.value;
+    return GENERATION_BASES.has(selected) ? selected : 'current';
+}
+
+function captureCandidateSnapshot(session) {
+    session.candidateSnapshot = {
+        candidate: session.candidate,
+        impactPlan: session.impactPlan ? cloneValue(session.impactPlan) : null,
+        reviewPlan: session.reviewPlan ? cloneValue(session.reviewPlan) : null,
+        repository: session.repository ? cloneValue(session.repository) : null,
+        generationIncomplete: session.generationIncomplete,
+        generationIncompleteReason: session.generationIncompleteReason,
+        generationSegments: session.generationSegments,
+        forceLoadedAttemptId: session.forceLoadedAttemptId,
+    };
+}
+
+function restoreCandidateSnapshot(panel) {
+    const session = state.session;
+    const snapshot = session?.candidateSnapshot;
+    if (!session || !snapshot) return;
+    session.impactPlan = snapshot.impactPlan;
+    session.reviewPlan = snapshot.reviewPlan;
+    session.repository = snapshot.repository;
+    session.generationIncomplete = snapshot.generationIncomplete;
+    session.generationIncompleteReason = snapshot.generationIncompleteReason;
+    session.generationSegments = snapshot.generationSegments;
+    session.forceLoadedAttemptId = snapshot.forceLoadedAttemptId;
+    session.candidateSnapshot = null;
+
+    if (snapshot.candidate) {
+        panel.querySelector('.story-rewriter-preview').hidden = false;
+        initializeCandidateReview(panel, snapshot.candidate, { acceptAll: true, preserveCandidate: true });
+        renderImpactPlan(panel);
+        renderReferences(panel);
+    } else {
+        session.candidate = '';
+        session.proposalCandidate = '';
+        session.reviewAudit = null;
+        session.audit = null;
+        panel.querySelector('.story-rewriter-candidate').value = '';
+        panel.querySelector('.story-rewriter-preview').hidden = true;
+        panel.querySelector('.story-rewriter-apply').disabled = true;
+        panel.querySelector('.story-rewriter-replace').disabled = true;
+    }
+    updateGenerationBasis(panel);
+}
+
+function loadFailedAttempt(panel, attempt) {
+    const confirmed = globalThis.confirm?.([
+        '这是一份未通过完整性检查的失败残片。',
+        '强制载入后可以编辑和应用，但它可能遗漏大量原文或包含模型说明。',
+        '',
+        '确认载入为可编辑草稿吗？',
+    ].join('\n')) ?? false;
+    if (!confirmed) return;
+
+    const session = state.session;
+    session.impactPlan = cloneValue(attempt.impactPlan);
+    session.reviewPlan = cloneValue(attempt.impactPlan);
+    session.generationIncomplete = true;
+    session.generationIncompleteReason = attempt.reason;
+    session.generationSegments = attempt.segments;
+    session.pendingInstruction = attempt.instruction;
+    session.forceLoadedAttemptId = attempt.id;
+    panel.querySelector('.story-rewriter-preview').hidden = false;
+    initializeCandidateReview(panel, attempt.candidate, { acceptAll: true, preserveCandidate: true });
+    switchWorkspaceView(panel, 'full');
+    updateGenerationBasis(panel);
+    panel.querySelector('.story-rewriter-status').textContent = '已强制载入失败残片。请先检查或编辑全文；应用时还会再次确认风险。';
+}
+
+function renderFailedAttempts(panel) {
+    const details = panel.querySelector('.story-rewriter-failed-attempts');
+    const host = panel.querySelector('.story-rewriter-failed-attempt-list');
+    const count = panel.querySelector('.story-rewriter-failed-attempt-count');
+    if (!details || !host || !count) return;
+    const attempts = state.session?.failedAttempts ?? [];
+    host.replaceChildren();
+    count.textContent = String(attempts.length);
+    details.hidden = attempts.length === 0;
+
+    for (const attempt of attempts) {
+        const card = document.createElement('article');
+        card.className = 'story-rewriter-turn is-failed';
+        const heading = document.createElement('strong');
+        heading.textContent = `未采用 · ${attempt.sourceStage || '正文生成'} · ${attempt.baseMode === 'original' ? '基于原文' : '继续当前版本'}`;
+        const reason = document.createElement('p');
+        reason.textContent = attempt.reason;
+        const summaryLabel = document.createElement('strong');
+        summaryLabel.textContent = '残片摘要';
+        const summary = document.createElement('p');
+        summary.textContent = attempt.candidate.length > 180 ? `${attempt.candidate.slice(0, 180)}…` : attempt.candidate;
+        const load = document.createElement('button');
+        load.type = 'button';
+        load.className = 'menu_button story-rewriter-load-failed';
+        load.textContent = '强制载入为可编辑草稿';
+        load.addEventListener('click', () => loadFailedAttempt(panel, attempt));
+        card.append(heading, reason, summaryLabel, summary, load);
+        host.append(card);
+    }
+}
+
+function recordFailedAttempt(panel, candidate, instruction, metadata = {}) {
+    const session = state.session;
+    const text = String(candidate ?? '').trim();
+    if (!session || !text) return;
+    session.failedAttempts ??= [];
+    session.failedAttempts.push({
+        id: `${Date.now().toString(36)}-${session.failedAttempts.length + 1}`,
+        instruction,
+        candidate: text,
+        reason: metadata.reason || '候选未通过完整性检查。',
+        sourceStage: metadata.sourceStage || session.partialStage || session.activeRevisionStage || '正文生成',
+        baseMode: metadata.baseMode || session.pendingBaseMode || 'original',
+        segments: Number(metadata.segments) || 1,
+        impactPlan: cloneValue(session.impactPlan),
+        createdAt: new Date().toISOString(),
+    });
+    session.failedAttempts = session.failedAttempts.slice(-MAX_FAILED_ATTEMPTS);
+    generationLog('candidate_quarantined', {
+        stage: metadata.sourceStage || session.partialStage || session.activeRevisionStage || '正文生成',
+        coverageRatio: metadata.coverageRatio,
+        usableCharacters: text.length,
+        baseMode: metadata.baseMode || session.pendingBaseMode || 'original',
+        disposition: 'failed_coverage',
+    }, session);
+    restoreCandidateSnapshot(panel);
+    renderFailedAttempts(panel);
+    panel.querySelector('.story-rewriter-status').textContent = `本轮没有生成可用的新版本，当前有效候选保持不变。${metadata.reason || '残片已移入“失败尝试”。'}`;
 }
 
 function updateContextSummary(panel) {
@@ -778,6 +927,7 @@ function resetSessionForScopeChange(panel) {
     session.candidate = '';
     session.requirements = [];
     session.turns = [];
+    session.failedAttempts = [];
     session.repository = null;
     session.impactPlan = null;
     session.reviewPlan = null;
@@ -798,6 +948,8 @@ function resetSessionForScopeChange(panel) {
     session.partialStage = '';
     session.activeRevisionStage = '';
     session.coverageRepairReason = '';
+    session.pendingBaseMode = 'original';
+    session.forceLoadedAttemptId = null;
     session.generationDiagnostics = [];
     panel.querySelector('.story-rewriter-candidate').value = '';
     panel.querySelector('.story-rewriter-preview').hidden = true;
@@ -806,6 +958,8 @@ function resetSessionForScopeChange(panel) {
     panel.querySelector('.story-rewriter-replace').disabled = true;
     panel.querySelector('.story-rewriter-generate').hidden = false;
     renderSessionTurns(panel);
+    renderFailedAttempts(panel);
+    updateGenerationBasis(panel);
 }
 
 function updateScopeInterface(panel) {
@@ -819,6 +973,7 @@ function updateScopeInterface(panel) {
     panel.querySelectorAll('.story-rewriter-view-tab').forEach(button => {
         button.classList.toggle('is-active', button.dataset.view === 'full');
     });
+    updateGenerationBasis(panel);
 }
 
 function buildSessionTask(instruction, panel) {
@@ -1541,13 +1696,31 @@ function auditCurrentCandidate(panel, { rebuildReview = false } = {}) {
     panel.querySelector('.story-rewriter-replace').disabled = false;
 }
 
-function showCandidate(panel, candidate, instruction) {
+function showCandidate(panel, candidate, instruction, metadata = {}) {
     const session = state.session;
+    const baseMode = metadata.baseMode || session.pendingBaseMode || 'original';
+    if (baseMode === 'original') {
+        session.requirements = [];
+        session.turns = [];
+        session.failedAttempts = [];
+    }
+    session.forceLoadedAttemptId = null;
+    session.candidateSnapshot = null;
+    panel.querySelector('.story-rewriter-preview').hidden = false;
+    panel.querySelector('.story-rewriter-generate').hidden = false;
+    panel.querySelector('.story-rewriter-apply').disabled = false;
+    panel.querySelector('.story-rewriter-replace').disabled = false;
+    session.reviewPlan = cloneValue(session.impactPlan);
+    initializeCandidateReview(panel, candidate);
+    const actualCandidate = session.candidate;
     session.requirements.push(instruction);
     if (session.requirements.length > MAX_SESSION_TURNS) session.requirements.shift();
     session.turns.push({
         instruction,
-        candidate,
+        candidate: actualCandidate,
+        rawCandidate: candidate,
+        sourceStage: metadata.sourceStage || session.activeRevisionStage || '完整正文',
+        baseMode,
         impactPlan: cloneValue(session.impactPlan),
         generationIncomplete: session.generationIncomplete,
         generationIncompleteReason: session.generationIncompleteReason,
@@ -1555,15 +1728,13 @@ function showCandidate(panel, candidate, instruction) {
         createdAt: new Date().toISOString(),
     });
     if (session.turns.length > MAX_SESSION_TURNS) session.turns.shift();
-    panel.querySelector('.story-rewriter-preview').hidden = false;
-    panel.querySelector('.story-rewriter-generate').hidden = false;
-    panel.querySelector('.story-rewriter-apply').disabled = false;
-    panel.querySelector('.story-rewriter-replace').disabled = false;
     panel.querySelector('.story-rewriter-instruction').value = '';
     renderSessionTurns(panel);
+    renderFailedAttempts(panel);
     renderReferences(panel);
-    session.reviewPlan = cloneValue(session.impactPlan);
-    initializeCandidateReview(panel, candidate);
+    const currentBasis = panel.querySelector('input[name="story-rewriter-generation-basis"][value="current"]');
+    if (currentBasis) currentBasis.checked = true;
+    updateGenerationBasis(panel);
     switchWorkspaceView(panel, 'changes');
     const autoRejected = session.reviewAudit.changes.filter(change => change.classification === 'protected').length;
     const filteredNotice = autoRejected ? `已默认保留原文中的 ${autoRejected} 项疑似越界变化。` : '';
@@ -1606,6 +1777,7 @@ async function generateCompleteRevision(panel, instruction) {
     const session = state.session;
     const task = session.pendingTask;
     const effectivePlan = getEffectiveImpactPlan(session.impactPlan);
+    const baseMode = session.pendingBaseMode || 'original';
     setWorkspaceBusy(panel, true, '正在生成完整候选稿…', { cancelable: true });
     let diagnosticStatus = 'failed';
     try {
@@ -1614,11 +1786,15 @@ async function generateCompleteRevision(panel, instruction) {
         updateContextSummary(panel);
         const originalTokens = await countTokens(session.capture.messageText);
         const desiredResponseLength = desiredRevisionTokens(originalTokens);
+        const revisionHistory = resolveRevisionHistory(
+            baseMode,
+            panel.querySelector('.story-rewriter-candidate').value.trim() || session.candidate,
+            session.requirements.slice(-MAX_SESSION_TURNS),
+        );
         const revisionTask = {
             ...task,
             impactPlan: effectivePlan,
-            previousCandidate: panel.querySelector('.story-rewriter-candidate').value.trim() || session.candidate,
-            previousInstructions: session.requirements.slice(-MAX_SESSION_TURNS),
+            ...revisionHistory,
         };
         const maxContext = limits.maxContext;
         const singleResponseLimit = limits.maxResponse || desiredResponseLength;
@@ -1712,7 +1888,7 @@ async function generateCompleteRevision(panel, instruction) {
                 complete,
                 stopReason,
             }, session);
-            return { assembled, complete, segments, stopReason };
+            return { assembled, complete, segments, stopReason, sourceStage: stageLabel };
         };
 
         let result = await runRevision(buildRevisionPrompt(revisionTask), '初稿');
@@ -1765,7 +1941,31 @@ async function generateCompleteRevision(panel, instruction) {
                 ? `${session.coverageRepairReason || `候选只有原文约 ${Math.round(coverage.lengthRatio * 100)}%`}，不足以覆盖应保留内容。请检查全文。`
                 : '';
         session.generationSegments = result.segments;
-        showCandidate(panel, result.assembled, instruction);
+        const disposition = classifyRevisionDisposition(result.assembled, result.complete, coverage);
+        if (disposition === 'failed_coverage') {
+            recordFailedAttempt(panel, result.assembled, instruction, {
+                reason: session.generationIncompleteReason,
+                sourceStage: result.sourceStage,
+                baseMode,
+                segments: result.segments,
+                coverageRatio: coverage.lengthRatio,
+            });
+            session.pendingTask = null;
+            session.pendingInstruction = '';
+            diagnosticStatus = 'rejected_incomplete';
+            return;
+        }
+        showCandidate(panel, result.assembled, instruction, {
+            sourceStage: result.sourceStage,
+            baseMode,
+        });
+        generationLog('candidate_accepted', {
+            stage: result.sourceStage,
+            coverageRatio: coverage.lengthRatio,
+            usableCharacters: result.assembled.length,
+            baseMode,
+            disposition,
+        }, session);
         session.pendingTask = null;
         session.pendingInstruction = '';
         diagnosticStatus = session.generationIncomplete ? 'incomplete' : 'completed';
@@ -1776,16 +1976,39 @@ async function generateCompleteRevision(panel, instruction) {
             : isGenerationTimeout(error) ? 'timeout' : 'failed';
         const partial = String(session.partialCandidate ?? '').trim();
         if (partial && state.session === session && panel.isConnected) {
+            const partialCoverage = assessRevisionCompleteness(session.capture.messageText, partial, effectivePlan);
             session.generationIncomplete = true;
             session.generationIncompleteReason = describePartialRecovery(error, session);
             session.generationSegments = session.partialSegments;
-            showCandidate(panel, partial, instruction);
+            const disposition = classifyRevisionDisposition(partial, false, partialCoverage);
+            if (disposition === 'failed_coverage') {
+                recordFailedAttempt(panel, partial, instruction, {
+                    reason: session.generationIncompleteReason,
+                    sourceStage: session.partialStage,
+                    baseMode,
+                    segments: session.partialSegments,
+                    coverageRatio: partialCoverage.lengthRatio,
+                });
+            } else {
+                showCandidate(panel, partial, instruction, {
+                    sourceStage: session.partialStage,
+                    baseMode,
+                });
+                generationLog('candidate_accepted', {
+                    stage: session.partialStage,
+                    coverageRatio: partialCoverage.lengthRatio,
+                    usableCharacters: partial.length,
+                    baseMode,
+                    disposition,
+                }, session);
+            }
             session.pendingTask = null;
             session.pendingInstruction = '';
             diagnosticStatus = isGenerationCancelled(error)
                 ? 'partial_cancelled'
                 : isGenerationTimeout(error) ? 'partial_timeout' : 'partial_failed';
         } else if (panel.isConnected) {
+            restoreCandidateSnapshot(panel);
             panel.querySelector('.story-rewriter-status').textContent = isGenerationCancelled(error)
                 ? '已取消本次生成；取消前尚未收到可保留的正文。'
                 : `生成失败：${error.message ?? error}`;
@@ -1814,6 +2037,8 @@ async function generateSemanticCandidate(panel) {
     session.influence = session.scopeMode === 'selection' ? 'strict' : 'semantic';
     const constraints = panel.querySelector('.story-rewriter-constraints').value.trim();
     const fellBack = applyAutomaticContextFallback(panel);
+    session.pendingBaseMode = getGenerationBasis(panel);
+    captureCandidateSnapshot(session);
     startGenerationSession(session);
     setWorkspaceBusy(panel, true, fellBack ? '完整上下文接口不可用，已降级并建立故事资料视图…' : '正在建立故事资料视图…', { cancelable: true });
     try {
@@ -1901,6 +2126,7 @@ async function generateSemanticCandidate(panel) {
         }
     } catch (error) {
         console.error('[Story Rewriter] impact analysis failed', error);
+        restoreCandidateSnapshot(panel);
         finishGenerationDiagnostics(session, isGenerationCancelled(error)
             ? 'cancelled'
             : isGenerationTimeout(error) ? 'timeout' : 'analysis_failed');
@@ -2047,11 +2273,13 @@ async function persistAsNewSwipe(message, nextText, session) {
 
 function confirmAuditRisks(session, actionLabel) {
     const audit = session.audit;
-    if (!audit?.hardBlocked && !audit?.requiresOverride) return true;
+    const forceLoaded = Boolean(session.forceLoadedAttemptId);
+    if (!audit?.hardBlocked && !audit?.requiresOverride && !forceLoaded) return true;
     const messages = [...(audit.conflicts ?? []), ...(audit.warnings ?? [])];
+    if (forceLoaded) messages.unshift('当前草稿来自未通过完整性检查的失败尝试，可能遗漏大量原文或包含模型说明。');
     const visibleMessages = messages.slice(0, 6).map(message => `• ${String(message).slice(0, 180)}`);
     if (messages.length > visibleMessages.length) visibleMessages.push(`• 另有 ${messages.length - visibleMessages.length} 项，请在“逐块确认”中检查。`);
-    const severity = audit.hardBlocked ? '审计发现高风险项' : '审计发现需要确认的提醒';
+    const severity = forceLoaded || audit.hardBlocked ? '审计发现高风险项' : '审计发现需要确认的提醒';
     return globalThis.confirm?.([
         `${severity}：`,
         '',
@@ -2105,7 +2333,7 @@ async function replaceWithSemanticCandidate(panel) {
     if (!candidate) return notify('候选内容不能为空。', 'warning');
     if (!captureIsCurrent(session?.capture)) return notify('原消息、聊天或 Swipe 已变化，未执行替换。', 'warning');
     auditCurrentCandidate(panel);
-    const hasAuditRisks = Boolean(session.audit?.hardBlocked || session.audit?.requiresOverride);
+    const hasAuditRisks = Boolean(session.forceLoadedAttemptId || session.audit?.hardBlocked || session.audit?.requiresOverride);
     if (hasAuditRisks) {
         if (!confirmAuditRisks(session, '直接覆盖当前 Swipe')) return;
     } else if (!(globalThis.confirm?.('这会替换当前 Swipe 的完整消息。确认继续吗？') ?? false)) return;
@@ -2192,12 +2420,14 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
         reviewFilter: 'all',
         reviewLayout: 'stacked',
         turns: [],
+        failedAttempts: [],
         repository: null,
         impactPlan: null,
         reviewPlan: null,
         audit: null,
         pendingTask: null,
         pendingInstruction: '',
+        pendingBaseMode: 'original',
         cancelled: false,
         generationInProgress: false,
         generationController: null,
@@ -2210,6 +2440,8 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
         partialStage: '',
         activeRevisionStage: '',
         coverageRepairReason: '',
+        forceLoadedAttemptId: null,
+        candidateSnapshot: null,
         generationDiagnostics: [],
         diagnosticRunId: null,
     };
@@ -2251,6 +2483,12 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
 
             <div class="story-rewriter-turns" aria-label="本次编辑历史" hidden></div>
 
+            <details class="story-rewriter-failed-attempts" hidden>
+                <summary>失败尝试（<span class="story-rewriter-failed-attempt-count">0</span>）</summary>
+                <small>这些结果没有通过完整性检查，未替换当前有效候选。</small>
+                <div class="story-rewriter-failed-attempt-list"></div>
+            </details>
+
             <section class="story-rewriter-preview" hidden>
                 <h4>新版本</h4>
                 <div class="story-rewriter-view-tabs" ${semantic ? '' : 'hidden'}>
@@ -2274,6 +2512,11 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
             </section>
         </div>
         <footer class="story-rewriter-panel-footer">
+            <fieldset class="story-rewriter-generation-basis" hidden>
+                <legend>本轮从哪里开始</legend>
+                <label><input type="radio" name="story-rewriter-generation-basis" value="current" checked><span><b>继续当前版本</b><small>保留之前已经确认的修改，再执行本轮要求。</small></span></label>
+                <label><input type="radio" name="story-rewriter-generation-basis" value="original"><span><b>从原文开始新任务</b><small>不携带旧候选和旧轮次要求。</small></span></label>
+            </fieldset>
             <label for="story-rewriter-instruction">本轮修改要求</label>
             <textarea id="story-rewriter-instruction" class="text_pole story-rewriter-instruction" rows="3" placeholder="${semantic ? '例如：这里面的贞德线重新规划一下，其他人物设定保持不变。' : '第一次可以说明完整目标；之后可输入“再克制一点”等继续调整。'}"></textarea>
             <div class="story-rewriter-actions">
@@ -2313,6 +2556,7 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
     panel.querySelector('.story-rewriter-replace').addEventListener('click', () => replaceWithSemanticCandidate(panel));
     panel.querySelector('.story-rewriter-candidate').addEventListener('input', event => {
         state.session.candidate = event.currentTarget.value;
+        updateGenerationBasis(panel);
         if (state.session.scopeMode === 'selection') {
             panel.querySelector('.story-rewriter-apply').disabled = !event.currentTarget.value.trim();
         } else {
@@ -2342,6 +2586,7 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
     updateContextSummary(panel);
     void syncContextSummary(panel);
     updateScopeInterface(panel);
+    renderFailedAttempts(panel);
     panel.querySelector('.story-rewriter-instruction').focus();
 }
 

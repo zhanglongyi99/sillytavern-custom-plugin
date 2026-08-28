@@ -8,6 +8,7 @@ import {
     buildRevisionCoverageRepairPrompt,
     buildRevisionPrompt,
     buildChangedBlocks,
+    classifyRevisionDisposition,
     compactSelectedText,
     composeRevisionFromDecisions,
     constrainImpactPlan,
@@ -26,9 +27,27 @@ import {
     REVISION_BODY_MARKER,
     REVISION_END_MARKER,
     retrieveReferences,
+    resolveRevisionHistory,
     segmentMessage,
     validateImpactPlan,
 } from '../lib/semantic.js';
+
+test('starts an independent task without carrying prior drafts or requirements', () => {
+    assert.deepEqual(resolveRevisionHistory('original', '旧候选', ['旧要求']), {
+        previousCandidate: '',
+        previousInstructions: [],
+    });
+    assert.deepEqual(resolveRevisionHistory('current', '当前候选', ['继续克制一点']), {
+        previousCandidate: '当前候选',
+        previousInstructions: ['继续克制一点'],
+    });
+});
+
+test('quarantines low-coverage fragments but keeps full drafts with a missing boundary reviewable', () => {
+    assert.equal(classifyRevisionDisposition('分析或摘要', true, { complete: false }), 'failed_coverage');
+    assert.equal(classifyRevisionDisposition('完整候选', false, { complete: true }), 'reviewable_boundary_missing');
+    assert.equal(classifyRevisionDisposition('完整候选', true, { complete: true }), 'complete');
+});
 
 test('segments Markdown blocks with stable raw offsets', () => {
     const raw = '# 标题\n\n第一段。\n仍是第一段。\n\n第二段。';

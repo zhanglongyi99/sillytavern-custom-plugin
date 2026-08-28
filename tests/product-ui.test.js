@@ -113,6 +113,20 @@ test('keeps final save authority with the user after audit warnings', () => {
     assert.doesNotMatch(runtime, /apply\.disabled = !candidate\.value\.trim\(\) \|\|/);
 });
 
+test('separates independent tasks, valid turns, and quarantined failed attempts', () => {
+    assert.match(runtime, />继续当前版本</);
+    assert.match(runtime, />从原文开始新任务</);
+    assert.match(runtime, /function recordFailedAttempt/);
+    assert.match(runtime, /function captureCandidateSnapshot/);
+    assert.match(runtime, /function restoreCandidateSnapshot/);
+    assert.match(runtime, /本轮没有生成可用的新版本，当前有效候选保持不变/);
+    assert.match(runtime, /实际候选摘要/);
+    assert.match(runtime, /candidate: actualCandidate/);
+    assert.match(runtime, /强制载入为可编辑草稿/);
+    assert.match(runtime, /session\.forceLoadedAttemptId/);
+    assert.match(styles, /\.story-rewriter-turn\.is-failed/);
+});
+
 test('supports block-level acceptance and a long-text review workspace', () => {
     assert.match(runtime, />逐块确认</);
     assert.match(runtime, /仅采用计划内/);
