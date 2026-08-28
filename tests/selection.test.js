@@ -73,6 +73,37 @@ test('maps visible link text and omits the target URL', () => {
     assert.equal(range.rawText, '旧车站');
 });
 
+test('maps a selection across Markdown table cells and omits the delimiter row', () => {
+    const raw = [
+        '星野泉早期登场备注。',
+        '',
+        '| 回合 | 场景 | 核心事件 |',
+        '| :---: | --- | --- |',
+        '| 5 | 周二：公司茶水间 | 黄毛递来一杯红茶。 |',
+        '| 6 | 周四：加班夜 | 两人在电梯口交谈。 |',
+    ].join('\n');
+    const selected = '回合\t场景\t核心事件\n5\t周二：公司茶水间\t黄毛递来一杯红茶。\n6\t周四：加班夜\t两人在电梯口交谈。';
+    const projection = projectMarkdown(raw);
+    const range = findSelectionRange(raw, selected, 12);
+
+    assert.doesNotMatch(projection.text, /:---:/);
+    assert.ok(range);
+    assert.equal(range.rawText, [
+        '回合 | 场景 | 核心事件 |',
+        '| :---: | --- | --- |',
+        '| 5 | 周二：公司茶水间 | 黄毛递来一杯红茶。 |',
+        '| 6 | 周四：加班夜 | 两人在电梯口交谈。',
+    ].join('\n'));
+});
+
+test('maps selections across raw HTML table cells', () => {
+    const raw = '<table><tr><th>回合</th><th>场景</th></tr><tr><td>5</td><td>茶水间</td></tr></table>';
+    const range = findSelectionRange(raw, '回合\t场景\n5\t茶水间', 0);
+
+    assert.ok(range);
+    assert.equal(range.rawText, '回合</th><th>场景</th></tr><tr><td>5</td><td>茶水间');
+});
+
 test('normalizes whitespace and typographic quotation marks for comparison', () => {
     assert.equal(normalizeComparable('  “别\n走”  '), '"别 走"');
 });

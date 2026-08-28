@@ -2,7 +2,7 @@
 
 一个可通过 Git URL 安装的 SillyTavern 前端扩展。用户只需要指出问题位置并描述修改目标，插件会结合酒馆完整上下文生成一个保留原版本的新版本。
 
-> 当前版本：`0.7.0`。建议先在非关键聊天中试用，并为重要聊天保留备份。模型、预设与世界书兼容设计参见 [v0.6 通用性重构](docs/V0.6_PORTABILITY_REFACTOR.md)，续接恢复机制参见 [v0.6.1 设计](docs/V0.6.1_CONTINUATION_RECOVERY.md)，推理通道兼容参见 [v0.6.2 设计](docs/V0.6.2_REASONING_SAFE_RECOVERY.md)，本地诊断记录参见 [v0.6.3 设计](docs/V0.6.3_DIAGNOSTIC_LOGGING.md)，长文本对照重构参见 [v0.7 设计](docs/V0.7_REVIEW_ALIGNMENT_REDESIGN.md)。
+> 当前版本：`0.7.1`。建议先在非关键聊天中试用，并为重要聊天保留备份。模型、预设与世界书兼容设计参见 [v0.6 通用性重构](docs/V0.6_PORTABILITY_REFACTOR.md)，续接恢复机制参见 [v0.6.1 设计](docs/V0.6.1_CONTINUATION_RECOVERY.md)，推理通道兼容参见 [v0.6.2 设计](docs/V0.6.2_REASONING_SAFE_RECOVERY.md)，本地诊断记录参见 [v0.6.3 设计](docs/V0.6.3_DIAGNOSTIC_LOGGING.md)，长文本对照重构参见 [v0.7 设计](docs/V0.7_REVIEW_ALIGNMENT_REDESIGN.md)，表格选区修复参见 [v0.7.1 说明](docs/V0.7.1_TABLE_SELECTION_FIX.md)。
 
 ## 功能
 
@@ -39,7 +39,8 @@
 - 候选可手动修订，并会在保存前重新审计。
 - 只改动所选片段，保留消息其余内容。
 - 默认通过 SillyTavern 原生 Swipe 返回旧版本；旧版覆盖式修改的撤销记录仍保持兼容。
-- 兼容常见 Markdown 选区，包括强调、链接、实体字符和换行。
+- 兼容常见 Markdown 选区，包括强调、链接、实体字符、换行及跨单元格表格选区；原生 HTML 表格也会按单元格边界映射。
+- 工作台已打开时仍可重新圈选消息并启动新的修改；未提交的修改要求和“必须保留”约束会带入新选区。
 - 长距离拖选或滚动页面时，工具条会在滚动停止和指针释放后重新定位到当前可见选区。
 - 可在高级设置中保留最近 30 次生成的本地诊断记录，并导出 JSON 供后续分析调用次数、耗时、续写、截断和失败阶段。
 

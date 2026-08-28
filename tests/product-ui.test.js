@@ -26,6 +26,14 @@ test('recovers a long auto-scrolled selection when pointer release is lost', () 
     assert.match(runtime, /addEventListener\('contextmenu', onSelectionPointerUp/);
 });
 
+test('allows selecting a new target while an idle workspace is open', () => {
+    assert.match(runtime, /state\.session\?\.generationInProgress/);
+    assert.doesNotMatch(runtime, /state\.settings\.enabled \|\| state\.panel \|\| state\.selectionPointerDown/);
+    assert.match(runtime, /const workspaceDraft = state\.panel/);
+    assert.match(runtime, /const panelLeft = state\.panel\?\.getBoundingClientRect/);
+    assert.match(styles, /\.story-rewriter-action\s*\{[\s\S]*?z-index: 10035/);
+});
+
 test('uses the active SillyTavern preset limits and tokenizer for budgeting', () => {
     assert.match(runtime, /getMaxContextTokens/);
     assert.match(runtime, /getMaxResponseTokens/);

@@ -51,7 +51,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.7.0';
+const EXTENSION_VERSION = '0.7.1';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -513,7 +513,10 @@ function showActionButton(rect) {
     button.hidden = false;
     const width = button.offsetWidth || 112;
     const height = button.offsetHeight || 36;
-    const left = Math.min(window.innerWidth - width - 8, Math.max(8, rect.left + rect.width / 2 - width / 2));
+    const panelLeft = state.panel?.getBoundingClientRect?.().left;
+    const visibleRight = Number.isFinite(panelLeft) ? Math.min(window.innerWidth, panelLeft) : window.innerWidth;
+    const maximumLeft = Math.max(8, visibleRight - width - 8);
+    const left = Math.min(maximumLeft, Math.max(8, rect.left + rect.width / 2 - width / 2));
     const top = Math.min(window.innerHeight - height - 8, Math.max(8, rect.bottom + 8));
     button.style.left = `${left}px`;
     button.style.top = `${top}px`;
@@ -525,7 +528,9 @@ function closestMessageText(node) {
 }
 
 function captureSelection() {
-    if (!state.active || !state.settings.enabled || state.panel || state.selectionPointerDown) return hideActionButton();
+    if (!state.active || !state.settings.enabled || state.selectionPointerDown || state.session?.generationInProgress) {
+        return hideActionButton();
+    }
     refreshContext();
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed || selection.rangeCount !== 1) return hideActionButton();
@@ -2153,6 +2158,10 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
     refreshContext();
     const sourceCapture = captureOverride ?? state.capture;
     if (!sourceCapture || !EDIT_MODES.has(editMode)) return;
+    const workspaceDraft = state.panel ? {
+        instruction: state.panel.querySelector('.story-rewriter-instruction')?.value ?? '',
+        constraints: state.panel.querySelector('.story-rewriter-constraints')?.value ?? '',
+    } : null;
     closeWorkspace();
     hideActionButton();
     const capture = {
@@ -2313,6 +2322,11 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
             auditCurrentCandidate(panel, { rebuildReview: true });
         }
     });
+    if (workspaceDraft) {
+        panel.querySelector('.story-rewriter-instruction').value = workspaceDraft.instruction;
+        panel.querySelector('.story-rewriter-constraints').value = workspaceDraft.constraints;
+        state.session.constraints = workspaceDraft.constraints;
+    }
     panel.querySelector('.story-rewriter-instruction').addEventListener('keydown', event => {
         if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
             event.preventDefault();
