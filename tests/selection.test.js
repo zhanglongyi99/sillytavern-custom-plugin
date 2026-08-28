@@ -96,6 +96,58 @@ test('maps a selection across Markdown table cells and omits the delimiter row',
     ].join('\n'));
 });
 
+test('maps table selections when the browser concatenates adjacent cells', () => {
+    const raw = [
+        '| 回合 | 场景 | 核心事件 | 状态 |',
+        '| --- | --- | --- | --- |',
+        '| 10 | 第二周·连续三天 | 黄毛把她逼到高潮。 | 任务7 |',
+        '| 11 | 第二周末·深夜办公室 | 她意识到自己回不去了。 | 任务8 |',
+        '| 12 | 第三周·日常独处 | 她开始偷看手机。 | 任务9渐进 |',
+    ].join('\n');
+    const selected = [
+        '10第二周·连续三天黄毛把她逼到高潮。任务7',
+        '11第二周末·深夜办公室她意识到自己回不去了。任务8',
+        '12第三周·日常独处她开始偷看手机。任务9渐进',
+    ].join('');
+    const range = findSelectionRange(raw, selected, 0);
+
+    assert.ok(range);
+    assert.equal(range.rawText, [
+        '10 | 第二周·连续三天 | 黄毛把她逼到高潮。 | 任务7 |',
+        '| 11 | 第二周末·深夜办公室 | 她意识到自己回不去了。 | 任务8 |',
+        '| 12 | 第三周·日常独处 | 她开始偷看手机。 | 任务9渐进',
+    ].join('\n'));
+});
+
+test('maps a selection that starts in prose and ends inside a table', () => {
+    const raw = [
+        '星野泉早期登场备注：这一面，要到很久以后才会被两人想起来。',
+        '',
+        '<details><summary>第一阶段·侵入（入职第一周~第四周）</summary>',
+        '',
+        '| 回合 | 场景 | 核心事件 | 完成任务 |',
+        '| --- | --- | --- | --- |',
+        '| 5 | 周二·公司茶水间 | 黄毛递来一杯英式红茶。 | 任务1、2 |',
+        '| 6 | 周四·加班夜 | 两人在电梯口交谈。 | 任务3 |',
+        '',
+        '</details>',
+    ].join('\n');
+    const selected = [
+        '这一面，要到很久以后才会被两人想起来。',
+        '第一阶段·侵入（入职第一周~第四周）',
+        '回合场景核心事件完成任务',
+        '5周二·公司茶水间黄毛递来一杯英式红茶。任务1、2',
+    ].join('');
+    const range = findSelectionRange(raw, selected, 10);
+
+    assert.ok(range);
+    assert.match(range.rawText, /^这一面/);
+    assert.match(range.rawText, /<details><summary>/);
+    assert.match(range.rawText, /\| --- \| --- \| --- \| --- \|/);
+    assert.match(range.rawText, /任务1、2$/);
+    assert.doesNotMatch(range.rawText, /周四·加班夜/);
+});
+
 test('maps selections across raw HTML table cells', () => {
     const raw = '<table><tr><th>回合</th><th>场景</th></tr><tr><td>5</td><td>茶水间</td></tr></table>';
     const range = findSelectionRange(raw, '回合\t场景\n5\t茶水间', 0);
@@ -106,6 +158,10 @@ test('maps selections across raw HTML table cells', () => {
 
 test('normalizes whitespace and typographic quotation marks for comparison', () => {
     assert.equal(normalizeComparable('  “别\n走”  '), '"别 走"');
+});
+
+test('preserves a single tilde while removing paired strikethrough markers', () => {
+    assert.equal(projectMarkdown('第一周~第四周，~~旧计划~~').text, '第一周~第四周，旧计划');
 });
 
 test('rejects invalid replacement ranges', () => {
