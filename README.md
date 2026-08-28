@@ -2,7 +2,7 @@
 
 一个可通过 Git URL 安装的 SillyTavern 前端扩展。用户只需要指出问题位置并描述修改目标，插件会结合酒馆完整上下文生成一个保留原版本的新版本。
 
-> 当前版本：`0.7.2`。建议先在非关键聊天中试用，并为重要聊天保留备份。模型、预设与世界书兼容设计参见 [v0.6 通用性重构](docs/V0.6_PORTABILITY_REFACTOR.md)，续接恢复机制参见 [v0.6.1 设计](docs/V0.6.1_CONTINUATION_RECOVERY.md)，推理通道兼容参见 [v0.6.2 设计](docs/V0.6.2_REASONING_SAFE_RECOVERY.md)，本地诊断记录参见 [v0.6.3 设计](docs/V0.6.3_DIAGNOSTIC_LOGGING.md)，长文本对照重构参见 [v0.7 设计](docs/V0.7_REVIEW_ALIGNMENT_REDESIGN.md)，表格选区修复参见 [v0.7.1 说明](docs/V0.7.1_TABLE_SELECTION_FIX.md)，候选状态重构参见 [v0.7.2 设计](docs/V0.7.2_CANDIDATE_LIFECYCLE.md)。
+> 当前版本：`0.7.3`。建议先在非关键聊天中试用，并为重要聊天保留备份。模型、预设与世界书兼容设计参见 [v0.6 通用性重构](docs/V0.6_PORTABILITY_REFACTOR.md)，续接恢复机制参见 [v0.6.1 设计](docs/V0.6.1_CONTINUATION_RECOVERY.md)，推理通道兼容参见 [v0.6.2 设计](docs/V0.6.2_REASONING_SAFE_RECOVERY.md)，本地诊断记录参见 [v0.6.3 设计](docs/V0.6.3_DIAGNOSTIC_LOGGING.md)，长文本对照重构参见 [v0.7 设计](docs/V0.7_REVIEW_ALIGNMENT_REDESIGN.md)，表格选区修复参见 [v0.7.1 说明](docs/V0.7.1_TABLE_SELECTION_FIX.md)，候选状态重构参见 [v0.7.2 设计](docs/V0.7.2_CANDIDATE_LIFECYCLE.md)，跨页拖选恢复参见 [v0.7.3 说明](docs/V0.7.3_SELECTION_SETTLE_RECOVERY.md)。
 
 ## 功能
 

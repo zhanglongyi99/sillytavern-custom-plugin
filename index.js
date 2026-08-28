@@ -53,7 +53,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.7.2';
+const EXTENSION_VERSION = '0.7.3';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -92,6 +92,8 @@ const state = {
     observer: null,
     observerQueued: false,
     selectionCaptureTimer: null,
+    selectionSettleTimer: null,
+    selectionSettleSignature: '',
     selectionPointerDown: false,
     panelResizeCleanup: null,
     sessionHistory: new WeakMap(),
@@ -575,22 +577,69 @@ function captureSelection() {
     showActionButton(rect);
 }
 
-function scheduleSelectionCapture(delay = 0, releaseStuckPointer = false) {
+function scheduleSelectionCapture(delay = 0) {
     window.clearTimeout(state.selectionCaptureTimer);
     state.selectionCaptureTimer = window.setTimeout(() => {
         state.selectionCaptureTimer = null;
-        if (releaseStuckPointer) state.selectionPointerDown = false;
         captureSelection();
+    }, delay);
+}
+
+function getSelectionSignature() {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount !== 1) return '';
+    const range = selection.getRangeAt(0);
+    const text = selection.toString();
+    if (!text.trim()) return '';
+    return [
+        range.startOffset,
+        range.endOffset,
+        text.length,
+        text.slice(0, 48),
+        text.slice(-48),
+    ].join('\u241f');
+}
+
+function clearSelectionSettleCapture() {
+    window.clearTimeout(state.selectionSettleTimer);
+    state.selectionSettleTimer = null;
+    state.selectionSettleSignature = '';
+}
+
+function scheduleSelectionSettleCapture(delay = 260) {
+    const signature = getSelectionSignature();
+    if (!signature) return clearSelectionSettleCapture();
+
+    window.clearTimeout(state.selectionSettleTimer);
+    state.selectionSettleSignature = signature;
+    state.selectionSettleTimer = window.setTimeout(() => {
+        state.selectionSettleTimer = null;
+        const liveSignature = getSelectionSignature();
+        if (!liveSignature) return clearSelectionSettleCapture();
+        if (liveSignature !== state.selectionSettleSignature) {
+            scheduleSelectionSettleCapture(delay);
+            return;
+        }
+
+        // Mobile/native selection handles and cross-viewport drag selection do
+        // not always deliver their final pointerup to the page. A stable live
+        // DOM selection is a safer completion signal than keeping the toolbar
+        // permanently hidden behind a stale pointer-down flag.
+        state.selectionPointerDown = false;
+        state.selectionSettleSignature = '';
+        scheduleSelectionCapture(0);
     }, delay);
 }
 
 function onSelectionPointerDown(event) {
     if (event.target?.closest?.('.story-rewriter-ui')) return;
+    clearSelectionSettleCapture();
     state.selectionPointerDown = true;
     hideActionButton();
 }
 
 function onSelectionPointerUp(event) {
+    clearSelectionSettleCapture();
     state.selectionPointerDown = false;
     if (event.target?.closest?.('.story-rewriter-ui')) return;
     scheduleSelectionCapture(0);
@@ -602,16 +651,24 @@ function onSelectionKeyUp(event) {
 }
 
 function onSelectionChange() {
-    if (!state.active || state.selectionPointerDown) return;
+    if (!state.active) return;
+    hideActionButton();
+    if (state.selectionPointerDown) {
+        scheduleSelectionSettleCapture();
+        return;
+    }
     scheduleSelectionCapture(40);
 }
 
 function onViewportScroll() {
     hideActionButton();
-    // Auto-scroll selection can release outside the document, so pointerup may
-    // never reach us. Once scrolling settles, trust the live DOM selection and
-    // clear a stale pointer-down state before recapturing it.
-    scheduleSelectionCapture(180, true);
+    if (state.selectionPointerDown) {
+        // Cross-viewport drag selection can lose its final pointerup. Wait for
+        // the live selection itself to settle instead of guessing from scroll.
+        scheduleSelectionSettleCapture();
+        return;
+    }
+    scheduleSelectionCapture(180);
 }
 
 function onViewportResize() {
@@ -620,6 +677,7 @@ function onViewportResize() {
 }
 
 function onWindowBlur() {
+    clearSelectionSettleCapture();
     state.selectionPointerDown = false;
     scheduleSelectionCapture(80);
 }
@@ -2776,6 +2834,7 @@ export function deactivate() {
     document.removeEventListener('scroll', onViewportScroll, true);
     window.clearTimeout(state.selectionCaptureTimer);
     state.selectionCaptureTimer = null;
+    clearSelectionSettleCapture();
     state.selectionPointerDown = false;
     state.observer?.disconnect();
     state.observer = null;

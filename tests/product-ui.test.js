@@ -20,7 +20,11 @@ test('keeps technical context and influence selectors out of the workspace', () 
 });
 
 test('recovers a long auto-scrolled selection when pointer release is lost', () => {
-    assert.match(runtime, /scheduleSelectionCapture\(180, true\)/);
+    assert.match(runtime, /if \(state\.selectionPointerDown\) \{[\s\S]{0,240}scheduleSelectionSettleCapture\(\)/);
+    assert.match(runtime, /scheduleSelectionCapture\(180\)/);
+    assert.match(runtime, /function scheduleSelectionSettleCapture\(delay = 260\)/);
+    assert.match(runtime, /if \(state\.selectionPointerDown\) \{\s*scheduleSelectionSettleCapture\(\)/);
+    assert.match(runtime, /const liveSignature = getSelectionSignature\(\)/);
     assert.match(runtime, /addEventListener\('mouseup', onSelectionPointerUp/);
     assert.match(runtime, /addEventListener\('touchend', onSelectionPointerUp/);
     assert.match(runtime, /addEventListener\('contextmenu', onSelectionPointerUp/);
