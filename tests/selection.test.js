@@ -164,6 +164,29 @@ test('preserves a single tilde while removing paired strikethrough markers', () 
     assert.equal(projectMarkdown('第一周~第四周，~~旧计划~~').text, '第一周~第四周，旧计划');
 });
 
+test('maps long selections across Markdown thematic breaks', () => {
+    const raw = [
+        '故事主干结束。',
+        '',
+        '---',
+        '',
+        '下面是详细展开。',
+        '',
+        '* * *',
+        '',
+        '1. 第一项：按在墙上的强吻。',
+        '2. 第二项：事后安抚。',
+    ].join('\n');
+    const selected = '故事主干结束。\n\n下面是详细展开。\n\n第一项：按在墙上的强吻。';
+    const range = findSelectionRange(raw, selected, 0);
+
+    assert.ok(range);
+    assert.match(range.rawText, /---/);
+    assert.match(range.rawText, /\* \* \*/);
+    assert.match(range.rawText, /第一项：按在墙上的强吻。$/);
+    assert.doesNotMatch(range.rawText, /第二项/);
+});
+
 test('rejects invalid replacement ranges', () => {
     assert.throws(() => replaceRange('abc', { start: 2, end: 4 }, 'x'), RangeError);
 });
