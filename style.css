@@ -574,8 +574,28 @@
 }
 
 .story-rewriter-diff-version summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
     margin: 0 !important;
     cursor: pointer;
+    list-style: none;
+}
+
+.story-rewriter-diff-version summary::-webkit-details-marker {
+    display: none;
+}
+
+details.story-rewriter-diff-version summary::after {
+    content: '▸ 展开';
+    flex: 0 0 auto;
+    opacity: 0.72;
+    font-size: 0.84em;
+}
+
+.story-rewriter-diff-version[open] summary::after {
+    content: '▾ 收起';
 }
 
 .story-rewriter-diff-caption {

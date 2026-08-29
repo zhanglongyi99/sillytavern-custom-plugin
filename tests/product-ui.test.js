@@ -161,3 +161,10 @@ test('supports block-level acceptance and a long-text review workspace', () => {
     assert.match(styles, /\.story-rewriter-diff-pair\s*\{[\s\S]*?grid-template-columns: minmax\(0, 1fr\)/);
     assert.match(styles, /\.story-rewriter-panel\.is-review-side \.story-rewriter-diff-pair\s*\{[\s\S]*?grid-template-columns: minmax\(0, 1fr\) minmax\(0, 1fr\)/);
 });
+
+test('shows long source text by default with an explicit collapse control', () => {
+    assert.match(runtime, /section\.open = true/);
+    assert.doesNotMatch(runtime, /section\.open = text\.length <= 700/);
+    assert.match(styles, /content: '▸ 展开'/);
+    assert.match(styles, /content: '▾ 收起'/);
+});

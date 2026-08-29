@@ -57,7 +57,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.7.6';
+const EXTENSION_VERSION = '0.7.7';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -1770,7 +1770,10 @@ function renderAudit(panel) {
             if (collapsible) {
                 const summary = document.createElement('summary');
                 summary.append(caption);
-                section.open = text.length <= 700;
+                // Always show the source text initially. Several SillyTavern
+                // themes hide the native details marker, so a closed long
+                // source looked like an empty comparison column.
+                section.open = true;
                 section.append(summary, content);
             } else {
                 section.append(caption, content);

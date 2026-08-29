@@ -2,7 +2,7 @@
 
 一个可通过 Git URL 安装的 SillyTavern 前端扩展。用户只需要指出问题位置并描述修改目标，插件会结合酒馆完整上下文生成一个保留原版本的新版本。
 
-> 当前版本：`0.7.6`。建议先在非关键聊天中试用，并为重要聊天保留备份。模型、预设与世界书兼容设计参见 [v0.6 通用性重构](docs/V0.6_PORTABILITY_REFACTOR.md)，续接恢复机制参见 [v0.6.1 设计](docs/V0.6.1_CONTINUATION_RECOVERY.md)，推理通道兼容参见 [v0.6.2 设计](docs/V0.6.2_REASONING_SAFE_RECOVERY.md)，本地诊断记录参见 [v0.6.3 设计](docs/V0.6.3_DIAGNOSTIC_LOGGING.md)，长文本对照重构参见 [v0.7 设计](docs/V0.7_REVIEW_ALIGNMENT_REDESIGN.md)，表格选区修复参见 [v0.7.1 说明](docs/V0.7.1_TABLE_SELECTION_FIX.md)，候选状态重构参见 [v0.7.2 设计](docs/V0.7.2_CANDIDATE_LIFECYCLE.md)，跨页拖选恢复参见 [v0.7.3 说明](docs/V0.7.3_SELECTION_SETTLE_RECOVERY.md)，表格结构空白兼容参见 [v0.7.4 说明](docs/V0.7.4_TABLE_RANGE_FALLBACK.md)，水平分隔线兼容参见 [v0.7.5 说明](docs/V0.7.5_THEMATIC_BREAK_SELECTION.md)，多轮有效修改校验参见 [v0.7.6 说明](docs/V0.7.6_ITERATION_EFFECT_VALIDATION.md)。
+> 当前版本：`0.7.7`。建议先在非关键聊天中试用，并为重要聊天保留备份。模型、预设与世界书兼容设计参见 [v0.6 通用性重构](docs/V0.6_PORTABILITY_REFACTOR.md)，续接恢复机制参见 [v0.6.1 设计](docs/V0.6.1_CONTINUATION_RECOVERY.md)，推理通道兼容参见 [v0.6.2 设计](docs/V0.6.2_REASONING_SAFE_RECOVERY.md)，本地诊断记录参见 [v0.6.3 设计](docs/V0.6.3_DIAGNOSTIC_LOGGING.md)，长文本对照重构参见 [v0.7 设计](docs/V0.7_REVIEW_ALIGNMENT_REDESIGN.md)，表格选区修复参见 [v0.7.1 说明](docs/V0.7.1_TABLE_SELECTION_FIX.md)，候选状态重构参见 [v0.7.2 设计](docs/V0.7.2_CANDIDATE_LIFECYCLE.md)，跨页拖选恢复参见 [v0.7.3 说明](docs/V0.7.3_SELECTION_SETTLE_RECOVERY.md)，表格结构空白兼容参见 [v0.7.4 说明](docs/V0.7.4_TABLE_RANGE_FALLBACK.md)，水平分隔线兼容参见 [v0.7.5 说明](docs/V0.7.5_THEMATIC_BREAK_SELECTION.md)，多轮有效修改校验参见 [v0.7.6 说明](docs/V0.7.6_ITERATION_EFFECT_VALIDATION.md)，长原文显示修复参见 [v0.7.7 说明](docs/V0.7.7_VISIBLE_SOURCE_COMPARISON.md)。
 
 ## 功能
 
@@ -31,6 +31,7 @@
 - 段落差异使用 Patience 风格唯一锚点与多段模糊对齐，支持一段扩成多段、多段合并为一段，并避免把无关内容强行配对。
 - 相邻同类变化会合并为有限大小的审核 hunk；展示、选择和最终合成共享同一份对齐结果。
 - 逐块确认默认采用适合长文的上下对照，长原文可折叠；也可切换左右对照、筛选计划内/疑似越界并快速跳转前后变化。
+- 对照中的长原文默认展开，折叠栏始终显示明确的“展开/收起”提示，不再因主题隐藏原生箭头而呈现空白左栏。
 - 单换行、常见紧凑 HTML 和长篇无空行正文会自动形成可审阅结构块，合成时保留原始分隔格式。
 - 影响分析优先使用 JSON Schema；后端不支持时自动切换无 Schema 标记协议，再失败则使用本地保守范围。
 - 模型置信度只作为界面参考，不会剥夺任何段落的用户选择权。
