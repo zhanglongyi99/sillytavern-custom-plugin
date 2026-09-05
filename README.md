@@ -2,7 +2,7 @@
 
 一个可通过 Git URL 安装的 SillyTavern 前端扩展。用户只需要指出问题位置并描述修改目标，插件会结合酒馆完整上下文生成一个保留原版本的新版本。
 
-> 当前版本：`0.7.7`。建议先在非关键聊天中试用，并为重要聊天保留备份。模型、预设与世界书兼容设计参见 [v0.6 通用性重构](docs/V0.6_PORTABILITY_REFACTOR.md)，续接恢复机制参见 [v0.6.1 设计](docs/V0.6.1_CONTINUATION_RECOVERY.md)，推理通道兼容参见 [v0.6.2 设计](docs/V0.6.2_REASONING_SAFE_RECOVERY.md)，本地诊断记录参见 [v0.6.3 设计](docs/V0.6.3_DIAGNOSTIC_LOGGING.md)，长文本对照重构参见 [v0.7 设计](docs/V0.7_REVIEW_ALIGNMENT_REDESIGN.md)，表格选区修复参见 [v0.7.1 说明](docs/V0.7.1_TABLE_SELECTION_FIX.md)，候选状态重构参见 [v0.7.2 设计](docs/V0.7.2_CANDIDATE_LIFECYCLE.md)，跨页拖选恢复参见 [v0.7.3 说明](docs/V0.7.3_SELECTION_SETTLE_RECOVERY.md)，表格结构空白兼容参见 [v0.7.4 说明](docs/V0.7.4_TABLE_RANGE_FALLBACK.md)，水平分隔线兼容参见 [v0.7.5 说明](docs/V0.7.5_THEMATIC_BREAK_SELECTION.md)，多轮有效修改校验参见 [v0.7.6 说明](docs/V0.7.6_ITERATION_EFFECT_VALIDATION.md)，长原文显示修复参见 [v0.7.7 说明](docs/V0.7.7_VISIBLE_SOURCE_COMPARISON.md)。
+> 当前版本：`0.7.8`。建议先在非关键聊天中试用，并为重要聊天保留备份。模型、预设与世界书兼容设计参见 [v0.6 通用性重构](docs/V0.6_PORTABILITY_REFACTOR.md)，续接恢复机制参见 [v0.6.1 设计](docs/V0.6.1_CONTINUATION_RECOVERY.md)，推理通道兼容参见 [v0.6.2 设计](docs/V0.6.2_REASONING_SAFE_RECOVERY.md)，本地诊断记录参见 [v0.6.3 设计](docs/V0.6.3_DIAGNOSTIC_LOGGING.md)，长文本对照重构参见 [v0.7 设计](docs/V0.7_REVIEW_ALIGNMENT_REDESIGN.md)，表格选区修复参见 [v0.7.1 说明](docs/V0.7.1_TABLE_SELECTION_FIX.md)，候选状态重构参见 [v0.7.2 设计](docs/V0.7.2_CANDIDATE_LIFECYCLE.md)，跨页拖选恢复参见 [v0.7.3 说明](docs/V0.7.3_SELECTION_SETTLE_RECOVERY.md)，表格结构空白兼容参见 [v0.7.4 说明](docs/V0.7.4_TABLE_RANGE_FALLBACK.md)，水平分隔线兼容参见 [v0.7.5 说明](docs/V0.7.5_THEMATIC_BREAK_SELECTION.md)，多轮有效修改校验参见 [v0.7.6 说明](docs/V0.7.6_ITERATION_EFFECT_VALIDATION.md)，长原文显示修复参见 [v0.7.7 说明](docs/V0.7.7_VISIBLE_SOURCE_COMPARISON.md)，悬浮气泡参见 [v0.7.8 说明](docs/V0.7.8_MINIMIZED_BUBBLE.md)。
 
 ## 功能
 
@@ -21,8 +21,9 @@
 - 支持“仅采用计划内”“全部采用”“全部保留原文”，即时合成完整版本且不重复调用模型。
 - 明显截断、大范围无关重写和保护事实冲突会显示高风险确认；审计不会剥夺用户最终保存或覆盖的权力。
 - 所有主要修改默认应用为新的 Swipe，原回复保持不变。
-- 右侧编辑工作台不会遮住聊天，可围绕同一选区连续提出多轮要求。
+- 右侧编辑工作台可围绕同一选区连续提出多轮要求。
 - 长文本工作台桌面默认宽度提升到 960px，可拖动左缘调整宽度，也可一键最大化。
+- 工作台可在空闲或生成期间缩成右下角悬浮气泡；任务、候选和逐块选择保持不变，点击气泡立即恢复。
 - 完整正文使用纯文本结束标记；未收到结束标记时会自动分段续接并去除重叠，不再因长正文 JSON 被截断而整篇报废。
 - 所有模型调用都有可配置超时；取消会立即结束插件等待，完整正文已收到的分段会作为不完整候选保留，仍可逐块检查和手工补完。
 - 完整正文由插件识别并清理显式推理块，避免酒馆的全局推理格式误把整篇正文删除；空正文会自动强化要求重试一次。

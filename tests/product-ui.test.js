@@ -162,6 +162,17 @@ test('supports block-level acceptance and a long-text review workspace', () => {
     assert.match(styles, /\.story-rewriter-panel\.is-review-side \.story-rewriter-diff-pair\s*\{[\s\S]*?grid-template-columns: minmax\(0, 1fr\) minmax\(0, 1fr\)/);
 });
 
+test('can minimize the live workspace into a restorable activity bubble', () => {
+    assert.match(runtime, /story-rewriter-minimize/);
+    assert.match(runtime, /story-rewriter-restore-bubble/);
+    assert.match(runtime, /setWorkspaceMinimized\(panel, true\)/);
+    assert.match(runtime, /setWorkspaceMinimized\(panel, false\)/);
+    assert.match(runtime, /!element\.classList\.contains\('story-rewriter-minimize'\)/);
+    assert.match(runtime, /!element\.classList\.contains\('story-rewriter-restore-bubble'\)/);
+    assert.match(styles, /\.story-rewriter-panel\.is-minimized/);
+    assert.match(styles, /\.story-rewriter-panel\[data-busy="true"\] \.story-rewriter-bubble-status/);
+});
+
 test('shows long source text by default with an explicit collapse control', () => {
     assert.match(runtime, /section\.open = true/);
     assert.doesNotMatch(runtime, /section\.open = text\.length <= 700/);

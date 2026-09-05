@@ -57,7 +57,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.7.7';
+const EXTENSION_VERSION = '0.7.8';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -711,6 +711,15 @@ function toggleWorkspaceMaximized(panel) {
         : '<i class="fa-solid fa-expand" aria-hidden="true"></i>';
 }
 
+function setWorkspaceMinimized(panel, minimized) {
+    if (!panel?.isConnected) return;
+    panel.classList.toggle('is-minimized', minimized);
+    const bubble = panel.querySelector('.story-rewriter-restore-bubble');
+    if (bubble) bubble.hidden = !minimized;
+    if (minimized) bubble?.focus();
+    else panel.querySelector('.story-rewriter-instruction')?.focus();
+}
+
 function enablePanelResize(panel) {
     const handle = panel.querySelector('.story-rewriter-resize-handle');
     if (!handle) return;
@@ -746,6 +755,8 @@ function setWorkspaceBusy(panel, busy, status = '', { cancelable = false } = {})
     panel.querySelectorAll('button, select, input').forEach(element => {
         element.disabled = busy
             ? !element.classList.contains('story-rewriter-cancel')
+                && !element.classList.contains('story-rewriter-minimize')
+                && !element.classList.contains('story-rewriter-restore-bubble')
             : element.dataset.permanentDisabled === 'true';
     });
     panel.querySelectorAll('textarea').forEach(element => {
@@ -2682,6 +2693,7 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
         <header class="story-rewriter-panel-header">
             <div><h3 id="story-rewriter-title">${titles[editMode]}</h3><small>消息 #${capture.messageId} · ${hasSelection ? '从选区开始' : '自动识别修改重点'}</small></div>
             <div class="story-rewriter-window-actions">
+                <button type="button" class="story-rewriter-minimize" aria-label="最小化为悬浮气泡" title="最小化为悬浮气泡"><i class="fa-solid fa-window-minimize" aria-hidden="true"></i></button>
                 <button type="button" class="story-rewriter-maximize" aria-label="最大化工作台" title="最大化工作台"><i class="fa-solid fa-expand" aria-hidden="true"></i></button>
                 <button type="button" class="story-rewriter-close" aria-label="关闭">×</button>
             </div>
@@ -2755,7 +2767,11 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
                 <small>危险操作：直接替换当前 Swipe 的完整消息。</small>
             </details>
             <div class="story-rewriter-status" role="status" aria-live="polite">会使用酒馆完整上下文，先识别影响范围，再生成新版本。</div>
-        </footer>`;
+        </footer>
+        <button type="button" class="story-rewriter-restore-bubble" aria-label="恢复故事改写工作台" title="恢复故事改写工作台" hidden>
+            <i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i>
+            <span class="story-rewriter-bubble-status" aria-hidden="true"></span>
+        </button>`;
 
     panel.querySelector('.story-rewriter-original').value = hasSelection ? capture.range.rawText : capture.messageText;
     panel.querySelectorAll('input[name="story-rewriter-scope"]').forEach(input => {
@@ -2770,6 +2786,8 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
         });
     });
     panel.querySelector('.story-rewriter-close').addEventListener('click', closeWorkspace);
+    panel.querySelector('.story-rewriter-minimize').addEventListener('click', () => setWorkspaceMinimized(panel, true));
+    panel.querySelector('.story-rewriter-restore-bubble').addEventListener('click', () => setWorkspaceMinimized(panel, false));
     panel.querySelector('.story-rewriter-maximize').addEventListener('click', () => toggleWorkspaceMaximized(panel));
     panel.querySelector('.story-rewriter-cancel').addEventListener('click', () => {
         if (!state.session) return;
