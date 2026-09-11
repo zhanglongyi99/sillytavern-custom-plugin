@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
     assessRevisionEffect,
     assessRevisionCompleteness,
+    assessRevisionSegmentProgress,
     auditRevision,
     buildImpactPrompt,
     buildRevisionContinuationPrompt,
@@ -292,6 +293,31 @@ test('recovers only explicitly marked body text from a configured reasoning chan
         parseRevisionProviderResponse('<custom-thought>内部推理</custom-thought>\n外部正文', configuredParser),
         { text: '外部正文', complete: false, parseOutcome: 'configured_content' },
     );
+});
+
+test('does not count empty or tiny unterminated replies as revision progress', () => {
+    assert.deepEqual(
+        assessRevisionSegmentProgress({ text: '', complete: false, parseOutcome: 'reasoning_only' }, {
+            originalCharacters: 20000,
+        }),
+        { accepted: false, reason: 'reasoning_only', minimumCharacters: 200 },
+    );
+    assert.deepEqual(
+        assessRevisionSegmentProgress({ text: '我会继续修改。', complete: false, parseOutcome: 'plain' }, {
+            originalCharacters: 20000,
+        }),
+        { accepted: false, reason: 'insufficient_progress', minimumCharacters: 200 },
+    );
+    assert.equal(assessRevisionSegmentProgress({ text: '正文'.repeat(120), complete: false, parseOutcome: 'body_protocol' }, {
+        originalCharacters: 20000,
+    }).accepted, true);
+    assert.equal(assessRevisionSegmentProgress({ text: '好的', complete: true, parseOutcome: 'body_protocol' }, {
+        originalCharacters: 20000,
+    }).accepted, false);
+    assert.equal(assessRevisionSegmentProgress({ text: '短尾', complete: true, parseOutcome: 'body_protocol' }, {
+        assembledCharacters: 18000,
+        originalCharacters: 20000,
+    }).accepted, true);
 });
 
 test('builds a continuation request and removes duplicated overlap', () => {

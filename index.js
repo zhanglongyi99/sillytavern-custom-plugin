@@ -10,6 +10,7 @@ import {
 import {
     assessRevisionEffect,
     assessRevisionCompleteness,
+    assessRevisionSegmentProgress,
     auditRevision,
     buildImpactPrompt,
     buildRevisionContinuationPrompt,
@@ -57,7 +58,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.7.8';
+const EXTENSION_VERSION = '0.7.9';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -1973,6 +1974,7 @@ async function generateCompleteRevision(panel, instruction) {
                     break;
                 }
                 let parsed = { text: '', complete: false };
+                let progress = { accepted: false, reason: 'empty', minimumCharacters: 0 };
                 for (let emptyAttempt = 0; emptyAttempt < 2; emptyAttempt++) {
                     const requestPrompt = emptyAttempt === 0 ? prompt : [
                         prompt,
@@ -1987,6 +1989,10 @@ async function generateCompleteRevision(panel, instruction) {
                         promptTokens,
                     });
                     parsed = parseRevisionProviderResponse(raw, value => state.context?.parseReasoningFromString?.(value, { strict: false }));
+                    progress = assessRevisionSegmentProgress(parsed, {
+                        assembledCharacters: assembled.length,
+                        originalCharacters: baseline.length,
+                    });
                     generationLog('parsed', {
                         stage: stageLabel,
                         segment: segments + 1,
@@ -1995,20 +2001,42 @@ async function generateCompleteRevision(panel, instruction) {
                         usableCharacters: parsed.text.length,
                         complete: parsed.complete,
                         parseOutcome: parsed.parseOutcome,
+                        progressAccepted: progress.accepted,
+                        progressReason: progress.reason,
+                        minimumCharacters: progress.minimumCharacters,
                     }, session);
-                    if (parsed.text || (parsed.complete && assembled)) break;
-                    console.warn('[Story Rewriter] model returned no usable revision text', {
+                    if (progress.accepted) break;
+                    console.warn('[Story Rewriter] model returned no meaningful revision progress', {
                         stage: stageLabel,
                         segment: segments + 1,
                         attempt: emptyAttempt + 1,
                         providerCharacters: raw.length,
                         usableCharacters: parsed.text.length,
                         parseOutcome: parsed.parseOutcome,
+                        progressReason: progress.reason,
+                        minimumCharacters: progress.minimumCharacters,
                     });
                     if (emptyAttempt === 0) {
                         const position = segments === 0 ? stageLabel : `${stageLabel}第 ${segments + 1} 段`;
-                        panel.querySelector('.story-rewriter-status').textContent = `${position}未找到明确正文，正在使用正文边界协议重试…`;
+                        panel.querySelector('.story-rewriter-status').textContent = `${position}只返回了空正文或极短非正文，正在使用正文边界协议重试…`;
                     }
+                }
+                if (!progress.accepted) {
+                    stopReason = progress.reason === 'reasoning_only' ? 'reasoning_only' : 'no_progress';
+                    generationLog('revision_no_progress', {
+                        stage: stageLabel,
+                        segment: segments + 1,
+                        responseCharacters: assembled.length,
+                        stopReason,
+                        parseOutcome: parsed.parseOutcome,
+                        progressAccepted: false,
+                        progressReason: progress.reason,
+                        minimumCharacters: progress.minimumCharacters,
+                    }, session);
+                    if (!assembled) {
+                        throw new Error(`${stageLabel}连续两次只返回空正文或极短非正文。当前模型可能把回答放进了推理通道；请关闭当前连接的“请求模型推理”后重试。`);
+                    }
+                    break;
                 }
                 if (parsed.text) {
                     assembled = segments === 0
@@ -2017,7 +2045,6 @@ async function generateCompleteRevision(panel, instruction) {
                 }
                 complete = parsed.complete;
                 segments++;
-                if (!assembled) throw new Error(`${stageLabel}连续两次没有返回带正文边界的可用内容。模型可能只返回了推理、空响应，或没有遵守正文协议。`);
                 savePartialCheckpoint(session, assembled, segments, { complete, stage: stageLabel });
                 if (complete) {
                     stopReason = 'completed';
@@ -2077,6 +2104,26 @@ async function generateCompleteRevision(panel, instruction) {
                 session.coverageRepairReason += '；完整性修复返回的内容更少，因此继续保留初稿';
             }
         }
+        if (!coverage.complete) {
+            const noProgressReason = ['no_progress', 'reasoning_only'].includes(result.stopReason)
+                ? '模型连续两次只返回空正文或极短非正文，已停止自动续接以避免无效调用；'
+                : '';
+            session.generationIncomplete = true;
+            session.generationIncompleteReason = `${noProgressReason}${session.coverageRepairReason || `候选只有原文约 ${Math.round(coverage.lengthRatio * 100)}%`}，不足以覆盖应保留内容。${noProgressReason ? '请关闭当前连接的“请求模型推理”后重试。' : '请检查全文。'}`;
+            session.generationSegments = result.segments;
+            recordFailedAttempt(panel, result.assembled, instruction, {
+                reason: session.generationIncompleteReason,
+                sourceStage: result.sourceStage,
+                baseMode,
+                baseline,
+                segments: result.segments,
+                coverageRatio: coverage.lengthRatio,
+            });
+            session.pendingTask = null;
+            session.pendingInstruction = '';
+            diagnosticStatus = 'rejected_incomplete';
+            return;
+        }
         let effect = assessRevisionEffect(baseline, result.assembled, effectivePlan);
         logRevisionEffectAssessment(session, baseline, result.assembled, effect, { stage: result.sourceStage, retryAttempt: 0 });
         if (!effect.effective) {
@@ -2126,26 +2173,14 @@ async function generateCompleteRevision(panel, instruction) {
                 ? `已达到最多 ${MAX_REVISION_SEGMENTS} 个续接分段，仍未收到正文结束标记。请检查文章结尾。`
                 : result.stopReason === 'budget_exhausted'
                     ? '完整候选已用完本轮总预算，但未收到正文结束标记。请检查文章结尾。'
+                    : ['no_progress', 'reasoning_only'].includes(result.stopReason)
+                        ? '模型连续两次只返回空正文或极短非正文，已停止自动续接以避免无效调用。请检查文章结尾；若正文不完整，请关闭当前连接的“请求模型推理”后重试。'
                     : '没有收到正文结束标记，模型可能已结束，也可能仍被截断。请检查文章结尾。'
             : !coverage.complete
                 ? `${session.coverageRepairReason || `候选只有原文约 ${Math.round(coverage.lengthRatio * 100)}%`}，不足以覆盖应保留内容。请检查全文。`
                 : '';
         session.generationSegments = result.segments;
         const disposition = classifyRevisionDisposition(result.assembled, result.complete, coverage);
-        if (disposition === 'failed_coverage') {
-            recordFailedAttempt(panel, result.assembled, instruction, {
-                reason: session.generationIncompleteReason,
-                sourceStage: result.sourceStage,
-                baseMode,
-                baseline,
-                segments: result.segments,
-                coverageRatio: coverage.lengthRatio,
-            });
-            session.pendingTask = null;
-            session.pendingInstruction = '';
-            diagnosticStatus = 'rejected_incomplete';
-            return;
-        }
         showCandidate(panel, result.assembled, instruction, {
             sourceStage: result.sourceStage,
             baseMode,

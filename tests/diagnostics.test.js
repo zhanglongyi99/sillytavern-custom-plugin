@@ -33,6 +33,9 @@ test('keeps only privacy-safe diagnostic fields and builds summaries', () => {
         providerCharacters: 1200,
         usableCharacters: 900,
         parseOutcome: 'body_protocol',
+        progressAccepted: false,
+        progressReason: 'insufficient_progress',
+        minimumCharacters: 200,
         content: 'secret story',
     }, '2026-08-28T00:00:02.000Z');
     archive = appendDiagnosticEvent(archive, 'run-1', 'revision_effect', {
@@ -59,6 +62,9 @@ test('keeps only privacy-safe diagnostic fields and builds summaries', () => {
     assert.equal(archive.runs[0].summary.parseOutcomes.body_protocol, 1);
     assert.equal(archive.runs[0].events[1].baseMode, 'original');
     assert.equal(archive.runs[0].events[1].disposition, 'failed_coverage');
+    assert.equal(archive.runs[0].events[1].progressAccepted, false);
+    assert.equal(archive.runs[0].events[1].progressReason, 'insufficient_progress');
+    assert.equal(archive.runs[0].events[1].minimumCharacters, 200);
     assert.equal(archive.runs[0].events[2].baselineFingerprint, 'hash-a');
     assert.equal(archive.runs[0].events[2].focusChanges, 2);
     assert.equal(archive.runs[0].events[2].baselineText, undefined);
