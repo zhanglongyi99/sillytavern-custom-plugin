@@ -8,6 +8,7 @@ import {
     buildImpactPrompt,
     buildRevisionContinuationPrompt,
     buildRevisionCoverageRepairPrompt,
+    buildRevisionDeliveryRecoveryPrompt,
     buildRevisionNoChangeRetryPrompt,
     buildRevisionPrompt,
     buildChangedBlocks,
@@ -227,6 +228,25 @@ test('builds source-grounded two-stage prompts without character offsets', () =>
     assert.match(revisionPrompt, new RegExp(REVISION_END_MARKER.replace(/[\[\]]/g, '\\$&')));
     assert.match(revisionPrompt, new RegExp(REVISION_BODY_MARKER.replace(/[\[\]]/g, '\\$&')));
     assert.match(revisionPrompt, /不要输出.*JSON/);
+});
+
+test('builds a compact body-delivery recovery without dropping sources or edit scope', () => {
+    const prompt = buildRevisionDeliveryRecoveryPrompt({
+        instruction: '重排目标线',
+        constraints: '配角设定保持不变',
+        originalMessage: '完整工作稿',
+        previousCandidate: '',
+        impactPlan: { focusRegions: [{ paragraphId: 'P002' }], linkedRegions: [], transitionRegions: [] },
+        references: [{ id: 'lore', authority: 'fact', sourceLabel: '世界资料', text: '固定事实' }],
+    });
+    assert.match(prompt, /影响范围已经分析完毕/);
+    assert.match(prompt, /完整工作稿/);
+    assert.match(prompt, /重排目标线/);
+    assert.match(prompt, /固定事实/);
+    assert.match(prompt, /不得只返回修改片段/);
+    assert.match(prompt, new RegExp(REVISION_BODY_MARKER.replace(/[\[\]]/g, '\\$&')));
+    assert.match(prompt, new RegExp(REVISION_END_MARKER.replace(/[\[\]]/g, '\\$&')));
+    assert.doesNotMatch(prompt, /selectedText|previousInstructions|editMode|influence/);
 });
 
 test('parses terminal markers and detects an incomplete plain-text revision', () => {

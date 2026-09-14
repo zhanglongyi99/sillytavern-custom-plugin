@@ -15,6 +15,7 @@ import {
     buildImpactPrompt,
     buildRevisionContinuationPrompt,
     buildRevisionCoverageRepairPrompt,
+    buildRevisionDeliveryRecoveryPrompt,
     buildRevisionNoChangeRetryPrompt,
     buildRevisionPrompt,
     classifyRevisionDisposition,
@@ -58,7 +59,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.7.9';
+const EXTENSION_VERSION = '0.7.10';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -274,8 +275,8 @@ function generationLog(event, metadata = {}, session = state.session) {
         'baselineFingerprint', 'candidateFingerprint', 'equivalent',
         'effectiveChange', 'similarity', 'changedCharacters',
         'focusChanges', 'plannedChanges', 'protectedChanges',
-        'retryAttempt', 'retryReason',
-    ];
+    'retryAttempt', 'retryReason', 'recoveryStrategy', 'maximumAttempts',
+];
     const safe = Object.fromEntries(allowed
         .filter(key => metadata[key] !== undefined)
         .map(key => [key, metadata[key]]));
@@ -1975,18 +1976,31 @@ async function generateCompleteRevision(panel, instruction) {
                 }
                 let parsed = { text: '', complete: false };
                 let progress = { accepted: false, reason: 'empty', minimumCharacters: 0 };
-                for (let emptyAttempt = 0; emptyAttempt < 2; emptyAttempt++) {
-                    const requestPrompt = emptyAttempt === 0 ? prompt : [
-                        prompt,
-                        '<empty_response_retry>',
-                        `上一次响应没有带明确边界的可用正文。不要分析或说明原因；第一行只输出 ${REVISION_BODY_MARKER}，下一行立即从正文第一个字符（续接时为下一个字符）开始，并在真正完成后追加结束标记。`,
-                        '</empty_response_retry>',
-                    ].join('\n\n');
+                const maximumAttempts = segments === 0 ? 3 : 2;
+                for (let emptyAttempt = 0; emptyAttempt < maximumAttempts; emptyAttempt++) {
+                    const recoveryStrategy = emptyAttempt === 0
+                        ? 'standard'
+                        : segments === 0 ? 'compact_delivery' : 'boundary_retry';
+                    const requestPrompt = emptyAttempt === 0
+                        ? prompt
+                        : segments === 0
+                            ? buildRevisionDeliveryRecoveryPrompt(revisionTask, emptyAttempt)
+                            : [
+                                prompt,
+                                '<empty_response_retry>',
+                                `上一次续接没有带明确边界的可用正文。不要分析或说明原因；第一行只输出 ${REVISION_BODY_MARKER}，下一行立即从 generatedPrefix 的下一个字符开始，并在真正完成后追加结束标记。`,
+                                '</empty_response_retry>',
+                            ].join('\n\n');
+                    const requestPromptTokens = emptyAttempt === 0
+                        ? promptTokens
+                        : await countTokens(requestPrompt);
                     const raw = await generatePlain(requestPrompt, responseLength, session, {
                         stage: `${stageLabel}·第 ${segments + 1} 段`,
                         segment: segments + 1,
                         attempt: emptyAttempt + 1,
-                        promptTokens,
+                        promptTokens: requestPromptTokens,
+                        recoveryStrategy,
+                        maximumAttempts,
                     });
                     parsed = parseRevisionProviderResponse(raw, value => state.context?.parseReasoningFromString?.(value, { strict: false }));
                     progress = assessRevisionSegmentProgress(parsed, {
@@ -2004,6 +2018,8 @@ async function generateCompleteRevision(panel, instruction) {
                         progressAccepted: progress.accepted,
                         progressReason: progress.reason,
                         minimumCharacters: progress.minimumCharacters,
+                        recoveryStrategy,
+                        maximumAttempts,
                     }, session);
                     if (progress.accepted) break;
                     console.warn('[Story Rewriter] model returned no meaningful revision progress', {
@@ -2015,10 +2031,15 @@ async function generateCompleteRevision(panel, instruction) {
                         parseOutcome: parsed.parseOutcome,
                         progressReason: progress.reason,
                         minimumCharacters: progress.minimumCharacters,
+                        recoveryStrategy,
                     });
-                    if (emptyAttempt === 0) {
+                    if (emptyAttempt + 1 < maximumAttempts) {
                         const position = segments === 0 ? stageLabel : `${stageLabel}第 ${segments + 1} 段`;
-                        panel.querySelector('.story-rewriter-status').textContent = `${position}只返回了空正文或极短非正文，正在使用正文边界协议重试…`;
+                        panel.querySelector('.story-rewriter-status').textContent = segments === 0
+                            ? emptyAttempt === 0
+                                ? `${position}未启动可见正文，正在切换精简执行协议重新起稿…`
+                                : `${position}精简执行协议仍未启动正文，正在进行最后一次恢复…`
+                            : `${position}只返回了空正文或极短非正文，正在使用正文边界协议重试…`;
                     }
                 }
                 if (!progress.accepted) {
@@ -2034,7 +2055,7 @@ async function generateCompleteRevision(panel, instruction) {
                         minimumCharacters: progress.minimumCharacters,
                     }, session);
                     if (!assembled) {
-                        throw new Error(`${stageLabel}连续两次只返回空正文或极短非正文。当前模型可能把回答放进了推理通道；请关闭当前连接的“请求模型推理”后重试。`);
+                        throw new Error(`${stageLabel}多次请求均在正文开始前提前结束。插件已尝试标准协议与精简执行协议；这不表示上下文不足。请检查当前连接的推理/正文路由，或更换更稳定的模型后重试。`);
                     }
                     break;
                 }
@@ -2106,10 +2127,10 @@ async function generateCompleteRevision(panel, instruction) {
         }
         if (!coverage.complete) {
             const noProgressReason = ['no_progress', 'reasoning_only'].includes(result.stopReason)
-                ? '模型连续两次只返回空正文或极短非正文，已停止自动续接以避免无效调用；'
+                ? '模型多次在正文开始前提前结束，插件已切换精简执行协议并停止无效续接；'
                 : '';
             session.generationIncomplete = true;
-            session.generationIncompleteReason = `${noProgressReason}${session.coverageRepairReason || `候选只有原文约 ${Math.round(coverage.lengthRatio * 100)}%`}，不足以覆盖应保留内容。${noProgressReason ? '请关闭当前连接的“请求模型推理”后重试。' : '请检查全文。'}`;
+            session.generationIncompleteReason = `${noProgressReason}${session.coverageRepairReason || `候选只有原文约 ${Math.round(coverage.lengthRatio * 100)}%`}，不足以覆盖应保留内容。${noProgressReason ? '请检查当前连接的推理/正文路由，或更换更稳定的模型后重试。' : '请检查全文。'}`;
             session.generationSegments = result.segments;
             recordFailedAttempt(panel, result.assembled, instruction, {
                 reason: session.generationIncompleteReason,
@@ -2174,7 +2195,7 @@ async function generateCompleteRevision(panel, instruction) {
                 : result.stopReason === 'budget_exhausted'
                     ? '完整候选已用完本轮总预算，但未收到正文结束标记。请检查文章结尾。'
                     : ['no_progress', 'reasoning_only'].includes(result.stopReason)
-                        ? '模型连续两次只返回空正文或极短非正文，已停止自动续接以避免无效调用。请检查文章结尾；若正文不完整，请关闭当前连接的“请求模型推理”后重试。'
+                        ? '模型多次在正文开始前提前结束，已停止无效续接。请检查文章结尾；若正文不完整，请检查当前连接的推理/正文路由，或更换更稳定的模型后重试。'
                     : '没有收到正文结束标记，模型可能已结束，也可能仍被截断。请检查文章结尾。'
             : !coverage.complete
                 ? `${session.coverageRepairReason || `候选只有原文约 ${Math.round(coverage.lengthRatio * 100)}%`}，不足以覆盖应保留内容。请检查全文。`

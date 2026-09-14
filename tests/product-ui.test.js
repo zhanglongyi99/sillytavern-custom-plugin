@@ -76,10 +76,12 @@ test('continues long plain-text revisions instead of wrapping the article in JSO
     assert.match(runtime, /removeReasoning: false/);
     assert.match(runtime, /parseReasoningFromString/);
     assert.doesNotMatch(runtime, /scripts\/reasoning\.js/);
-    assert.match(runtime, /只返回了空正文或极短非正文，正在使用正文边界协议重试/);
+    assert.match(runtime, /正在切换精简执行协议重新起稿/);
+    assert.match(runtime, /const maximumAttempts = segments === 0 \? 3 : 2/);
+    assert.match(runtime, /buildRevisionDeliveryRecoveryPrompt/);
     assert.match(runtime, /if \(!progress\.accepted\)/);
     assert.match(runtime, /stopReason = progress\.reason === 'reasoning_only' \? 'reasoning_only' : 'no_progress'/);
-    assert.match(runtime, /已停止自动续接以避免无效调用/);
+    assert.match(runtime, /停止无效续接/);
     assert.match(runtime, /assessRevisionCompleteness/);
     assert.match(runtime, /正在进行完整性修复/);
     assert.match(runtime, /session\.generationIncomplete && change\.kind === 'deleted'/);
