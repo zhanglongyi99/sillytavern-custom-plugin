@@ -673,6 +673,24 @@ details.story-rewriter-diff-version summary::after {
     font: inherit;
 }
 
+.story-rewriter-highlight-toggle[aria-pressed="true"] {
+    outline: 2px solid currentColor;
+    outline-offset: -2px;
+}
+
+.is-highlight-changes .story-rewriter-inline-removed {
+    background: rgb(210 65 65 / 30%);
+    text-decoration: line-through;
+    border-radius: 2px;
+}
+
+.is-highlight-changes .story-rewriter-inline-added {
+    background: rgb(50 185 95 / 30%);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    border-radius: 2px;
+}
+
 .story-rewriter-sources ul,
 .story-rewriter-impact-group ul {
     padding-left: 20px;

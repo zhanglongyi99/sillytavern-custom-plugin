@@ -42,6 +42,7 @@ import {
     validateImpactPlan,
 } from './lib/semantic.js';
 import { appendRevisionSwipe } from './lib/swipe.js';
+import { diffInline } from './lib/inline-diff.js';
 import {
     addDiagnosticRun,
     appendDiagnosticEvent,
@@ -59,7 +60,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.7.10';
+const EXTENSION_VERSION = '0.7.11';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -84,6 +85,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     analysisResponseLength: 4096,
     generationTimeoutSeconds: 180,
     diagnosticsEnabled: true,
+    highlightChanges: true,
 });
 
 const state = {
@@ -1694,6 +1696,7 @@ function renderAudit(panel) {
     }
 
     const toolbar = document.createElement('div');
+    panel.classList.toggle('is-highlight-changes', state.settings.highlightChanges !== false);
     toolbar.className = 'story-rewriter-review-toolbar';
     const count = document.createElement('strong');
     count.className = 'story-rewriter-review-count';
@@ -1723,6 +1726,14 @@ function renderAudit(panel) {
         button.dataset.reviewLayout = layout;
         button.setAttribute('aria-pressed', 'false');
     }
+    const highlight = addAction('高亮变化', () => {
+        state.settings.highlightChanges = !state.settings.highlightChanges;
+        saveSettings();
+        panel.classList.toggle('is-highlight-changes', state.settings.highlightChanges);
+        highlight.setAttribute('aria-pressed', String(state.settings.highlightChanges));
+    }, 'story-rewriter-highlight-toggle');
+    highlight.setAttribute('aria-pressed', String(state.settings.highlightChanges !== false));
+    highlight.title = '显示具体字词和标点变化：原文红色删除线，候选绿色下划线；仅影响显示';
     addAction('仅采用计划内', () => setReviewAcceptance(panel, change => change.classification !== 'protected'));
     addAction('全部采用', () => setReviewAcceptance(panel, () => true));
     addAction('全部保留原文', () => setReviewAcceptance(panel, () => false));
@@ -1772,6 +1783,7 @@ function renderAudit(panel) {
 
         const pair = document.createElement('div');
         pair.className = 'story-rewriter-diff-pair';
+        const inline = diffInline(change.originalText, change.candidateText);
         const makeVersion = (label, text, emptyLabel, collapsible = false) => {
             const section = document.createElement(collapsible ? 'details' : 'section');
             section.className = `story-rewriter-diff-version is-${label === '原文' ? 'original' : 'candidate'}`;
@@ -1779,7 +1791,13 @@ function renderAudit(panel) {
             caption.className = 'story-rewriter-diff-caption';
             caption.textContent = `${label} · ${text.length} 字`;
             const content = document.createElement('pre');
-            content.textContent = text || emptyLabel;
+            if (!text) content.textContent = emptyLabel;
+            else for (const part of inline[label === '原文' ? 'original' : 'candidate']) {
+                const span = document.createElement('span');
+                span.textContent = part.text;
+                if (part.changed) span.className = `story-rewriter-inline-${label === '原文' ? 'removed' : 'added'}`;
+                content.append(span);
+            }
             if (collapsible) {
                 const summary = document.createElement('summary');
                 summary.append(caption);
