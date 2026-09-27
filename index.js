@@ -43,6 +43,7 @@ import {
 } from './lib/semantic.js';
 import { appendRevisionSwipe } from './lib/swipe.js';
 import { diffInline } from './lib/inline-diff.js';
+import { REVIEW_SCHEMA, buildReviewPrompt, parseReview, reviewPlan } from './lib/review.js';
 import {
     addDiagnosticRun,
     appendDiagnosticEvent,
@@ -60,7 +61,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.7.12';
+const EXTENSION_VERSION = '0.8.0';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -86,6 +87,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     generationTimeoutSeconds: 180,
     diagnosticsEnabled: true,
     highlightChanges: true,
+    reviewRequirements: '',
 });
 
 const state = {
@@ -2310,6 +2312,145 @@ async function generateCompleteRevision(panel, instruction) {
     }
 }
 
+async function reviewCandidate(panel) {
+    const session = state.session;
+    if (!session || session.generationInProgress) return;
+    const status = panel.querySelector('.story-rewriter-status');
+    if (!captureIsCurrent(session.capture)) {
+        status.textContent = '原消息、聊天或 Swipe 已变化，请重新打开工作台。';
+        return;
+    }
+    if (session.scopeMode === 'selection') {
+        status.textContent = '检查针对完整回复，请先切换到智能关联调整。';
+        return;
+    }
+    const host = panel.querySelector('.story-rewriter-review-report');
+    host.hidden = false;
+    host.textContent = '正在检查…';
+    const requirements = panel.querySelector('.story-rewriter-review-requirements').value.trim();
+    state.settings.reviewRequirements = requirements;
+    saveSettings();
+    const instruction = panel.querySelector('.story-rewriter-instruction').value.trim();
+    const constraints = panel.querySelector('.story-rewriter-constraints').value.trim();
+    session.pendingBaseMode = getGenerationBasis(panel);
+    const current = panel.querySelector('.story-rewriter-candidate').value.trim() || session.candidate;
+    const baseline = session.pendingBaseMode === 'current' && current ? current : session.capture.messageText;
+    session.generationBaseline = baseline;
+    captureCandidateSnapshot(session);
+    startGenerationSession(session);
+    setWorkspaceBusy(panel, true, '正在检查完整回复…', { cancelable: true });
+    let handedOff = false;
+    let outcome = 'review_failed';
+    try {
+        applyAutomaticContextFallback(panel);
+        const limits = await syncContextSummary(panel);
+        const paragraphs = segmentMessage(baseline);
+        const repository = await buildSemanticRepository(session, [instruction, baseline].join('\n'), [requirements, constraints].join('\n'));
+        session.repository = repository;
+        const history = createChatChunks(state.context.chat, session.capture.messageId);
+        const recent = history.filter(p => Number(p.sourceId) < session.capture.messageId && Number(p.sourceId) >= session.capture.messageId - 6);
+        let references = [...new Map([
+            ...repository.retrieval.items, ...recent,
+            { id: 'review-long-term', text: requirements, sourceLabel: '用户检查要求' },
+            { id: 'review-current', text: instruction, sourceLabel: '用户本轮要求' },
+            { id: 'review-constraints', text: constraints, sourceLabel: '编辑约束' },
+        ].filter(p => p.text).map(p => [p.id, p])).values()];
+        const ensureCurrent = () => {
+            if (session.cancelled) throw new GenerationCancelledError();
+            if (state.session !== session || !panel.isConnected || !captureIsCurrent(session.capture)) throw new Error('检查对象已变化，本轮已停止。');
+        };
+        const inspect = async previous => {
+            ensureCurrent();
+            generationLog('retrieval_ready', {
+                stage: previous ? '补查复审' : '正文检查',
+                retrievalItems: references.length,
+                retrievalCharacters: references.reduce((sum, ref) => sum + ref.text.length, 0),
+            }, session);
+            const prompt = buildReviewPrompt({
+                paragraphs: paragraphs.map(p => ({ id: p.id, text: p.text })),
+                references, instruction, requirements, constraints,
+                contextMode: session.contextMode,
+            }, previous);
+            const tokens = await countTokens(prompt);
+            const available = limits.maxContext ? limits.maxContext - tokens - 512 : state.settings.analysisResponseLength;
+            const budget = Math.min(available, state.settings.analysisResponseLength, limits.maxResponse || Infinity);
+            if (budget < 512) throw new Error('检查资料超过当前上下文预算，请缩小检查对象或资料范围。');
+            const report = await generateStructured(prompt, REVIEW_SCHEMA, budget,
+                raw => parseReview(raw, paragraphs, references), session, previous ? '补查复审' : '正文检查');
+            ensureCurrent();
+            return report;
+        };
+        let report = await inspect(null);
+        let searched = [];
+        if (report.queries.length) {
+            status.textContent = '正在查询历史证据并复审（最多一轮）…';
+            searched = report.queries;
+            const found = searched.flatMap(query => retrieveReferences(history, query, {
+                maxResults: Math.max(1, Math.floor(state.settings.retrievalResults / searched.length)),
+                maxCharacters: Math.floor(state.settings.retrievalCharacters / searched.length),
+            }).items);
+            references = [...new Map([...references, ...found].map(p => [p.id, p])).values()];
+            report = await inspect(report);
+        }
+        const plan = reviewPlan(report);
+        generationLog('review_completed', {
+            stage: '正文检查',
+            outcome: plan.focusRegions.length ? 'confirmed_issues' : 'no_confirmed_issues',
+            focusChanges: plan.focusRegions.length,
+            attempt: searched.length ? 2 : 1,
+        }, session);
+        host.replaceChildren();
+        const overview = document.createElement('p');
+        overview.textContent = `检查完成：${report.issues.filter(i => i.certainty === 'confirmed').length} 项明确问题。使用 ${references.length} 条显式资料及${session.contextMode === 'tavern' ? '酒馆当前上下文' : '本地降级上下文'}；未检索到的历史不保证覆盖。${searched.length ? ` 补查：${searched.join('、')}` : ''}`;
+        host.append(overview);
+        for (const issue of report.issues) {
+            const entry = document.createElement('p');
+            entry.textContent = `${issue.certainty === 'confirmed' ? '明确问题' : issue.certainty === 'suggestion' ? '建议' : '待确认'} · ${issue.paragraphId}\n${issue.problem}\n建议：${issue.fix}\n依据 ${issue.evidenceId}：${issue.evidenceQuote}`;
+            entry.style.whiteSpace = 'pre-wrap';
+            host.append(entry);
+        }
+        const sources = document.createElement('details');
+        const label = document.createElement('summary');
+        label.textContent = '本次检查使用的资料';
+        sources.append(label);
+        for (const ref of references) {
+            const p = document.createElement('p');
+            p.textContent = `${ref.id} · ${ref.sourceLabel || ref.sourceType || '资料'}\n${ref.text}`;
+            sources.append(p);
+        }
+        host.append(sources);
+        outcome = 'review_completed';
+        if (!plan.focusRegions.length || !panel.querySelector('.story-rewriter-review-auto').checked) {
+            status.textContent = plan.focusRegions.length ? '检查完成，问题清单已保留；未生成修订。' : '检查完成，没有足够证据支持自动修改；请查看报告中的待确认项。';
+            return;
+        }
+        const repairInstruction = ['只修复下列有证据的问题，其他内容保持不变；不要删除分析或附加块。', ...plan.rewritePlan].join('\n');
+        session.impactPlan = plan;
+        session.pendingInstruction = repairInstruction;
+        session.pendingTask = {
+            editMode: 'full', influence: 'semantic', instruction: repairInstruction,
+            constraints: [requirements, constraints].filter(Boolean).join('\n'),
+            originalMessage: baseline, selectedText: '', paragraphs,
+            focusIds: plan.focusRegions.map(p => p.paragraphId), references,
+        };
+        ensureCurrent();
+        handedOff = true;
+        await generateCompleteRevision(panel, repairInstruction);
+    } catch (error) {
+        outcome = isGenerationCancelled(error) ? 'cancelled' : 'review_failed';
+        if (state.session === session && panel.isConnected) {
+            status.textContent = `检查停止：${error.message ?? error}`;
+            if (host.textContent === '正在检查…') host.textContent = status.textContent;
+        }
+    } finally {
+        if (!handedOff) {
+            finishGenerationDiagnostics(session, outcome);
+            session.generationInProgress = false;
+            if (state.session === session && panel.isConnected) setWorkspaceBusy(panel, false, status.textContent);
+        }
+    }
+}
+
 async function generateSemanticCandidate(panel) {
     const session = state.session;
     const instructionInput = panel.querySelector('.story-rewriter-instruction');
@@ -2793,6 +2934,13 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
             </details>
 
             <div class="story-rewriter-turns" aria-label="本次编辑历史" hidden></div>
+            <details class="story-rewriter-review-options">
+                <summary>检查要求与选项</summary>
+                <textarea class="text_pole story-rewriter-review-requirements" rows="3" placeholder="长期检查要求（本机当前用户的所有聊天共用，请勿混入某张卡的专属事实）"></textarea>
+                <label><input type="checkbox" class="story-rewriter-review-auto" checked>有明确问题时生成修订候选（取消勾选则只检查）</label>
+                <small>检查完整回复；必要时补查一次历史。修订后仍需确认应用。</small>
+            </details>
+            <section class="story-rewriter-review-report" aria-label="检查报告" hidden></section>
 
             <details class="story-rewriter-failed-attempts" hidden>
                 <summary>失败尝试（<span class="story-rewriter-failed-attempt-count">0</span>）</summary>
@@ -2833,6 +2981,7 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
             <div class="story-rewriter-actions">
                 <button type="button" class="menu_button story-rewriter-cancel" hidden>取消生成</button>
                 <button type="button" class="menu_button story-rewriter-generate">生成新版本</button>
+                <button type="button" class="menu_button story-rewriter-check">检查这条回复</button>
                 <button type="button" class="menu_button story-rewriter-apply" disabled>应用为新版本</button>
             </div>
             <details class="story-rewriter-advanced-actions">
@@ -2869,6 +3018,12 @@ function openRewriteWorkspace(editMode = 'semantic', captureOverride = null) {
         panel.querySelector('.story-rewriter-status').textContent = '正在取消本次生成…';
     });
     panel.querySelector('.story-rewriter-generate').addEventListener('click', () => generateCandidate(panel));
+    panel.querySelector('.story-rewriter-review-requirements').value = state.settings.reviewRequirements || '';
+    panel.querySelector('.story-rewriter-review-requirements').addEventListener('change', event => {
+        state.settings.reviewRequirements = event.target.value;
+        saveSettings();
+    });
+    panel.querySelector('.story-rewriter-check').addEventListener('click', () => reviewCandidate(panel));
     panel.querySelector('.story-rewriter-apply').addEventListener('click', () => applyCandidate(panel));
     panel.querySelector('.story-rewriter-replace').addEventListener('click', () => replaceWithSemanticCandidate(panel));
     panel.querySelector('.story-rewriter-candidate').addEventListener('input', event => {
