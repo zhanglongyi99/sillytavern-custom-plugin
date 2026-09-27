@@ -43,7 +43,7 @@ import {
 } from './lib/semantic.js';
 import { appendRevisionSwipe } from './lib/swipe.js';
 import { diffInline } from './lib/inline-diff.js';
-import { REVIEW_SCHEMA, buildReviewPrompt, parseReview, reviewPlan } from './lib/review.js';
+import { REVIEW_SCHEMA, buildReviewPrompt, parseReview, reviewPlan, buildReviewRepairInstruction } from './lib/review.js';
 import {
     addDiagnosticRun,
     appendDiagnosticEvent,
@@ -61,7 +61,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.8.0';
+const EXTENSION_VERSION = '0.8.1';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -2403,6 +2403,13 @@ async function reviewCandidate(panel) {
         const overview = document.createElement('p');
         overview.textContent = `检查完成：${report.issues.filter(i => i.certainty === 'confirmed').length} 项明确问题。使用 ${references.length} 条显式资料及${session.contextMode === 'tavern' ? '酒馆当前上下文' : '本地降级上下文'}；未检索到的历史不保证覆盖。${searched.length ? ` 补查：${searched.join('、')}` : ''}`;
         host.append(overview);
+        const advice = document.createElement('p');
+        const confirmed = report.issues.filter(i => i.certainty === 'confirmed');
+        advice.textContent = confirmed.length
+            ? `本篇整体修改意见\n${confirmed.map((issue, index) => `${index + 1}. ${issue.globalRevision || issue.fix}`).join('\n')}`
+            : '未形成有充分证据支持的整章修改意见。';
+        advice.style.whiteSpace = 'pre-wrap';
+        host.append(advice);
         for (const issue of report.issues) {
             const entry = document.createElement('p');
             entry.textContent = `${issue.certainty === 'confirmed' ? '明确问题' : issue.certainty === 'suggestion' ? '建议' : '待确认'} · ${issue.paragraphId}\n${issue.problem}\n建议：${issue.fix}\n依据 ${issue.evidenceId}：${issue.evidenceQuote}`;
@@ -2424,7 +2431,7 @@ async function reviewCandidate(panel) {
             status.textContent = plan.focusRegions.length ? '检查完成，问题清单已保留；未生成修订。' : '检查完成，没有足够证据支持自动修改；请查看报告中的待确认项。';
             return;
         }
-        const repairInstruction = ['只修复下列有证据的问题，其他内容保持不变；不要删除分析或附加块。', ...plan.rewritePlan].join('\n');
+        const repairInstruction = buildReviewRepairInstruction(report, paragraphs);
         session.impactPlan = plan;
         session.pendingInstruction = repairInstruction;
         session.pendingTask = {
