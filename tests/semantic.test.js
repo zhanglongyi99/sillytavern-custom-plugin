@@ -605,6 +605,32 @@ test('can accept or reject a proposed paragraph deletion', () => {
     assert.equal(composeRevisionFromDecisions(original, revised, []), original);
 });
 
+test('groups six short deletions or insertions and composes decisions losslessly', () => {
+    const short = '开头。\n\n结尾。';
+    const long = ['开头。', ...Array.from({ length: 6 }, (_, i) => `独立内容${i}。`), '结尾。'].join('\n\n');
+    const plan = { focusRegions: [], linkedRegions: [], transitionRegions: [], protectedFacts: [] };
+    for (const [original, candidate, kind] of [[long, short, 'deleted'], [short, long, 'inserted']]) {
+        const audit = auditRevision(original, candidate, plan);
+        assert.equal(audit.changes.length, 1);
+        assert.equal(audit.changes[0].kind, kind);
+        assert.equal(composeRevisionFromDecisions(original, candidate, [], audit.alignment), original);
+        assert.equal(composeRevisionFromDecisions(original, candidate, audit.changes.map(c => c.id), audit.alignment), candidate);
+    }
+});
+
+test('splits deletion runs at scope boundaries, unchanged anchors and character budget', () => {
+    const plan = { focusRegions: [{ paragraphId: 'P002' }], linkedRegions: [], transitionRegions: [], protectedFacts: [] };
+    const audit = auditRevision('开头。\n\n目标。\n\n保护。\n\n结尾。', '开头。\n\n结尾。', plan);
+    assert.deepEqual(audit.changes.map(c => c.classification), ['focus', 'protected']);
+    const emptyPlan = { ...plan, focusRegions: [] };
+    const separated = auditRevision('开头。\n\n删一。\n\n中间。\n\n删二。\n\n结尾。', '开头。\n\n中间。\n\n结尾。', emptyPlan);
+    assert.equal(separated.changes.length, 2);
+    const long = ['开头。', ...Array.from({ length: 8 }, (_, i) => `${i}${'长文本'.repeat(200)}`), '结尾。'].join('\n\n');
+    const bounded = auditRevision(long, '开头。\n\n结尾。', emptyPlan);
+    assert.ok(bounded.changes.length > 1);
+    assert.ok(bounded.changes.every(c => c.originalText.length <= 3200));
+});
+
 test('allows complete revision when the whole message is the focus', () => {
     const plan = {
         focusRegions: [{ paragraphId: 'P001' }, { paragraphId: 'P002' }],
