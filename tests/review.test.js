@@ -5,7 +5,43 @@ import { buildRevisionPrompt, buildRevisionDeliveryRecoveryPrompt, buildRevision
 
 const paragraphs = [{ id: 'P001', text: '人物还没有到达车站。' }];
 const references = [{ id: 'history', text: '人物已经到达车站。' }];
-const issue = { paragraphId: 'P001', problem: '时间冲突', fix: '核对到达时间', certainty: 'confirmed', evidenceId: 'history', evidenceQuote: '已经到达车站' };
+const issue = { category: 'requirement', paragraphId: 'P001', problem: '时间冲突', fix: '核对到达时间', certainty: 'confirmed', evidenceId: 'history', evidenceQuote: '已经到达车站' };
+test('continuity findings require two grounded locations and a known resolution', () => {
+    const parts = [{ id: 'P001', text: '两人一同乘电梯上楼。' }, { id: 'P002', text: '同一时刻她独自乘电梯上楼。' }];
+    const finding = { ...issue, category: 'continuity', evidenceId: 'P001', evidenceQuote: parts[0].text,
+        counterpartId: 'P002', counterpartQuote: parts[1].text,
+        alternativeExplanation: '两处均明确是同一时刻，不是先后两趟。', resolutionBasis: '以已确认的两人同行为准。', resolutionCertain: true };
+    const parse = finding => parseReview(JSON.stringify({ objective: '检查', queries: [], issues: [finding] }), parts, []);
+    assert.equal(parse(finding).issues[0].certainty, 'confirmed');
+    for (const override of [{ counterpartId: 'missing' }, { counterpartQuote: '不存在的独行记录' },
+        { counterpartId: 'P001', counterpartQuote: parts[0].text }, { resolutionCertain: false },
+        { resolutionBasis: '' }, { alternativeExplanation: '' }, { category: undefined }]) {
+        const report = parse({ ...finding, ...override });
+        assert.equal(report.issues[0].certainty, 'uncertain');
+        assert.equal(reviewPlan(report).focusRegions.length, 0);
+    }
+    assert.match(buildReviewRepairInstruction(parse(finding), parts), /同一时刻她独自乘电梯/);
+    assert.deepEqual(reviewPlan(parse(finding)).linkedRegions, []); // Evidence alone is not permission to edit.
+});
+test('both external evidence sides survive repair handoff; style never auto-repairs', () => {
+    const refs = [{ id: 'a', text: '书最后由甲保管。' }, { id: 'b', text: '同一时刻书仍在乙手里。' }];
+    const findings = [{ ...issue, category: 'style', evidenceId: 'a', evidenceQuote: refs[0].text },
+        { ...issue, category: 'continuity', evidenceId: 'a', evidenceQuote: refs[0].text,
+            counterpartId: 'b', counterpartQuote: refs[1].text, alternativeExplanation: '无交接但同一时刻的归属明确冲突。',
+            resolutionCertain: true, resolutionBasis: '以已确认的交接记录为准。' }];
+    const report = parseReview(JSON.stringify({ objective: '核对', queries: [], issues: findings }), paragraphs, refs);
+    assert.equal(report.issues[0].category, 'continuity');
+    assert.equal(report.issues[1].certainty, 'suggestion');
+    assert.deepEqual(repairReviewReferences(report, refs).map(item => item.id), ['a', 'b']);
+});
+test('review workflow prioritizes state and event checks with ambiguity safeguards', () => {
+    const prompt = buildReviewPrompt({ paragraphs, references });
+    for (const phrase of ['事件参与者', '相对日期', '物品从持有人', '信息何时由谁告诉谁',
+        '缺少交接描写不等于已证实矛盾', '隐藏真相不等于视角人物知情', '不能擅自选正文或日志为真']) {
+        assert.ok(prompt.includes(phrase));
+    }
+    assert.ok(prompt.indexOf('本章硬一致性 continuity') < prompt.indexOf('可选风格 style'));
+});
 test('history budget deduplicates and strips metadata without truncating the chapter', () => {
     const items = budgetReviewReferences([
         { id: 'a', text: '甲乙丙', keywords: ['internal'], previousId: 'secret' },

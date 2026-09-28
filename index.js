@@ -44,7 +44,7 @@ import {
 import { appendRevisionSwipe } from './lib/swipe.js';
 import { diffInline } from './lib/inline-diff.js';
 import { parseStructuredResponse, structuredFailureMessage, structuredRetryHint } from './lib/structured-response.js';
-import { REVIEW_SCHEMA, buildReviewPrompt, parseReview, reviewPlan, buildReviewRepairInstruction, budgetReviewReferences, repairReviewReferences, assessReviewRepair } from './lib/review.js';
+import { REVIEW_SCHEMA, buildReviewPrompt, parseReview, reviewPlan, buildReviewRepairInstruction, budgetReviewReferences, repairReviewReferences, assessReviewRepair, reviewEvidence } from './lib/review.js';
 import {
     addDiagnosticRun,
     appendDiagnosticEvent,
@@ -62,7 +62,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.8.3';
+const EXTENSION_VERSION = '0.8.4';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -2418,7 +2418,7 @@ async function reviewCandidate(panel) {
                 maxResults: Math.max(1, Math.floor(state.settings.retrievalResults / searched.length)),
                 maxCharacters: Math.floor(state.settings.retrievalCharacters / searched.length),
             }).items);
-            const cited = new Set(report.issues.map(issue => issue.evidenceId));
+            const cited = new Set(report.issues.flatMap(reviewEvidence).map(item => item.id));
             references = [...budgetReviewReferences([
                 ...references.filter(ref => cited.has(ref.id) && !ref.id.startsWith('review-')),
                 ...found, ...references.filter(ref => !ref.id.startsWith('review-')),
@@ -2446,6 +2446,11 @@ async function reviewCandidate(panel) {
         for (const issue of report.issues) {
             const entry = document.createElement('p');
             entry.textContent = `${issue.certainty === 'confirmed' ? '明确问题' : issue.certainty === 'suggestion' ? '建议' : '待确认'} · ${issue.paragraphId}\n${issue.problem}\n建议：${issue.fix}\n依据 ${issue.evidenceId}：${issue.evidenceQuote}`;
+            const categoryLabel = { continuity: '硬一致性', requirement: '要求与设定', format: '格式', style: '风格建议' }[issue.category] || '未分类';
+            entry.textContent = `[${categoryLabel}] ${entry.textContent}`;
+            if (issue.counterpartId) entry.textContent += `\n对照 ${issue.counterpartId}：${issue.counterpartQuote}`;
+            if (issue.alternativeExplanation) entry.textContent += `\n其他解释核对：${issue.alternativeExplanation}`;
+            if (issue.resolutionBasis) entry.textContent += `\n统一依据${issue.resolutionCertain ? '' : '（待确认）'}：${issue.resolutionBasis}`;
             entry.style.whiteSpace = 'pre-wrap';
             host.append(entry);
         }
