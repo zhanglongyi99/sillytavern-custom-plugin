@@ -43,6 +43,7 @@ import {
 } from './lib/semantic.js';
 import { appendRevisionSwipe } from './lib/swipe.js';
 import { diffInline } from './lib/inline-diff.js';
+import { parseStructuredResponse, structuredFailureMessage, structuredRetryHint } from './lib/structured-response.js';
 import { REVIEW_SCHEMA, buildReviewPrompt, parseReview, reviewPlan, buildReviewRepairInstruction, budgetReviewReferences, repairReviewReferences, assessReviewRepair } from './lib/review.js';
 import {
     addDiagnosticRun,
@@ -61,7 +62,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.8.2';
+const EXTENSION_VERSION = '0.8.3';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -281,6 +282,7 @@ function generationLog(event, metadata = {}, session = state.session) {
         'focusChanges', 'plannedChanges', 'protectedChanges',
     'retryAttempt', 'retryReason', 'recoveryStrategy', 'maximumAttempts',
     'progressAccepted', 'progressReason', 'minimumCharacters', 'pendingIssues', 'reviewIssues',
+    'interfaceCharacters', 'cleanedCharacters', 'configuredCharacters',
 ];
     const safe = Object.fromEntries(allowed
         .filter(key => metadata[key] !== undefined)
@@ -1336,7 +1338,7 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
                     skipWIAN: false,
                     responseLength,
                     jsonSchema: attempt === 0 ? schema : null,
-                    removeReasoning: true,
+                    removeReasoning: false,
                     trimToSentence: false,
                 });
             }
@@ -1358,22 +1360,22 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
             pluginPromptFingerprint: hashText(currentPrompt),
         });
         if (session.cancelled) throw new GenerationCancelledError();
-        try {
-            return parser(removeConfiguredReasoning(response));
-        } catch (error) {
-            lastError = error;
-            if (attempt === 0) {
-                const truncationHint = stageLabel === '影响分析' && /unterminated|unexpected end|end of json|截断/i.test(String(error.message ?? error))
-                    ? '上次输出疑似被截断。必须大幅压缩：不要复制原文，不要输出引句，每个理由只写一句，省略低置信度关联，确保 JSON 完整闭合。'
-                    : '';
-                currentPrompt = `${prompt}\n\n<format_retry>上一次${stageLabel}没有返回可解析的数据：${String(error.message ?? error)}。${truncationHint}当前后端可能不支持 JSON Schema。重新执行原任务，在 <story_rewriter_json_begin> 与 <story_rewriter_json_end> 之间只放一个完整、紧凑的 JSON 对象，不要代码围栏或解释。</format_retry>`;
-            }
+        const parsed = parseStructuredResponse(response, parser, removeConfiguredReasoning);
+        generationLog('structured_parsed', { stage: stageLabel, attempt: attempt + 1, ...parsed.metadata }, session);
+        if (parsed.value !== null) return parsed.value;
+        lastError = parsed.metadata.errorCode;
+        if (attempt === 0) {
+            panelStatusForStructuredRetry(session, stageLabel, lastError);
+            currentPrompt = `${prompt}\n\n<format_retry>${structuredRetryHint(lastError)}重新执行原任务，在 <story_rewriter_json_begin> 与 <story_rewriter_json_end> 之间只放一个完整、紧凑的 JSON 对象，不要代码围栏或解释。</format_retry>`;
         }
     }
-    if (stageLabel === '影响分析' && /json|unterminated|unexpected end|截断/i.test(String(lastError?.message ?? lastError))) {
-        throw new Error('模型连续两次返回了不完整的影响分析数据，通常是响应被截断。请提高当前预设的最大响应 Token，或减少按需资料条数。');
-    }
-    throw lastError ?? new Error(`${stageLabel}失败。`);
+    throw new Error(`${stageLabel}两次尝试均未得到有效报告；最后一次：${structuredFailureMessage(lastError)}。本轮检查或分析未完成，未据此修订正文。具体原因请查看诊断记录，不能仅凭此错误判断推理设置或输出额度。`);
+}
+
+function panelStatusForStructuredRetry(session, stage, code) {
+    if (state.session !== session) return;
+    const status = state.panel?.querySelector('.story-rewriter-status');
+    if (status) status.textContent = `${stage}：${structuredFailureMessage(code)}；正在进行唯一一次格式兼容重试…`;
 }
 
 async function generatePlain(prompt, responseLength, session, metadata = {}) {

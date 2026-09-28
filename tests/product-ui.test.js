@@ -52,9 +52,9 @@ test('reads impact rendering state from the active session', () => {
 test('migrates the old impact-analysis budget to a non-truncating default', () => {
     assert.match(runtime, /settingsVersion: 8/);
     assert.match(runtime, /analysisResponseLength: 4096/);
-    assert.match(runtime, /unterminated\|unexpected end\|end of json\|截断/);
+    assert.match(runtime, /parseStructuredResponse/);
     assert.match(runtime, /响应上限/);
-    assert.match(runtime, /模型连续两次返回了不完整的影响分析数据/);
+    assert.match(runtime, /两次尝试均未得到有效报告/);
 });
 
 test('persists privacy-safe generation diagnostics without story content', () => {
