@@ -43,7 +43,7 @@ import {
 } from './lib/semantic.js';
 import { appendRevisionSwipe } from './lib/swipe.js';
 import { diffInline } from './lib/inline-diff.js';
-import { REVIEW_SCHEMA, buildReviewPrompt, parseReview, reviewPlan, buildReviewRepairInstruction } from './lib/review.js';
+import { REVIEW_SCHEMA, buildReviewPrompt, parseReview, reviewPlan, buildReviewRepairInstruction, budgetReviewReferences, repairReviewReferences, assessReviewRepair } from './lib/review.js';
 import {
     addDiagnosticRun,
     appendDiagnosticEvent,
@@ -61,7 +61,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.8.1';
+const EXTENSION_VERSION = '0.8.2';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -280,6 +280,7 @@ function generationLog(event, metadata = {}, session = state.session) {
         'effectiveChange', 'similarity', 'changedCharacters',
         'focusChanges', 'plannedChanges', 'protectedChanges',
     'retryAttempt', 'retryReason', 'recoveryStrategy', 'maximumAttempts',
+    'progressAccepted', 'progressReason', 'minimumCharacters', 'pendingIssues', 'reviewIssues',
 ];
     const safe = Object.fromEntries(allowed
         .filter(key => metadata[key] !== undefined)
@@ -806,6 +807,7 @@ function renderSessionTurns(panel) {
                 panel.querySelector('.story-rewriter-apply').disabled = false;
             } else {
                 if (turn.impactPlan) {
+                    state.session.reviewRepairReport = turn.reviewRepairReport ?? null;
                     state.session.impactPlan = cloneValue(turn.impactPlan);
                     state.session.reviewPlan = cloneValue(turn.impactPlan);
                     renderImpactPlan(panel);
@@ -848,6 +850,7 @@ function captureCandidateSnapshot(session) {
         reviewPlan: session.reviewPlan ? cloneValue(session.reviewPlan) : null,
         repository: session.repository ? cloneValue(session.repository) : null,
         reviewBaseline: session.reviewBaseline,
+        reviewRepairReport: session.reviewRepairReport,
         generationBaseline: session.generationBaseline,
         generationIncomplete: session.generationIncomplete,
         generationIncompleteReason: session.generationIncompleteReason,
@@ -864,6 +867,7 @@ function restoreCandidateSnapshot(panel) {
     session.reviewPlan = snapshot.reviewPlan;
     session.repository = snapshot.repository;
     session.reviewBaseline = snapshot.reviewBaseline;
+    session.reviewRepairReport = snapshot.reviewRepairReport;
     session.generationBaseline = snapshot.generationBaseline;
     session.generationIncomplete = snapshot.generationIncomplete;
     session.generationIncompleteReason = snapshot.generationIncompleteReason;
@@ -901,6 +905,7 @@ function loadFailedAttempt(panel, attempt) {
     const session = state.session;
     session.impactPlan = cloneValue(attempt.impactPlan);
     session.reviewPlan = cloneValue(attempt.impactPlan);
+    session.reviewRepairReport = null;
     session.reviewBaseline = String(attempt.baseline ?? session.capture.messageText);
     session.generationBaseline = session.reviewBaseline;
     session.generationIncomplete = true;
@@ -1023,6 +1028,7 @@ function resetSessionForScopeChange(panel) {
     session.repository = null;
     session.impactPlan = null;
     session.reviewPlan = null;
+    session.reviewRepairReport = null;
     session.reviewBaseline = session.capture.messageText;
     session.generationBaseline = session.capture.messageText;
     session.audit = null;
@@ -1436,6 +1442,11 @@ function logRevisionEffectAssessment(session, baseline, candidate, assessment, m
 function createCandidateAudit(session, candidate) {
     const baseline = session.reviewBaseline || session.capture.messageText;
     const audit = auditRevision(baseline, candidate, getSessionReviewPlan(session));
+    if (session.reviewRepairReport) {
+        const assessment = assessReviewRepair(session.reviewRepairReport, baseline, candidate, getSessionReviewPlan(session));
+        audit.warnings.push(assessment.message);
+        audit.requiresOverride = !audit.hardBlocked;
+    }
     if (session.generationIncomplete) {
         audit.conflicts.unshift(session.generationIncompleteReason
             || '完整正文未通过完整性检查。请检查文章结尾；你仍可编辑或确认应用。');
@@ -1892,6 +1903,7 @@ function showCandidate(panel, candidate, instruction, metadata = {}) {
         instruction,
         candidate: actualCandidate,
         rawCandidate: candidate,
+        reviewRepairReport: session.reviewRepairReport ? cloneValue(session.reviewRepairReport) : null,
         sourceStage: metadata.sourceStage || session.activeRevisionStage || '完整正文',
         baseMode,
         baseline,
@@ -2075,7 +2087,7 @@ async function generateCompleteRevision(panel, instruction) {
                         minimumCharacters: progress.minimumCharacters,
                     }, session);
                     if (!assembled) {
-                        throw new Error(`${stageLabel}多次请求均在正文开始前提前结束。插件已尝试标准协议与精简执行协议；这不表示上下文不足。请检查当前连接的推理/正文路由，或更换更稳定的模型后重试。`);
+                        throw new Error(`${stageLabel}多次未返回足够的可用文本，标准与精简协议均未成功。现有返回不足以确定原因，请查看诊断记录中的响应长度与解析结果。`);
                     }
                     break;
                 }
@@ -2123,7 +2135,7 @@ async function generateCompleteRevision(panel, instruction) {
         if (result.complete && !coverage.complete) {
             const initialResult = result;
             const initialCoverage = coverage;
-            session.coverageRepairReason = `初稿只覆盖原文约 ${Math.round(coverage.lengthRatio * 100)}%`;
+            session.coverageRepairReason = `初稿长度仅为原文约 ${Math.round(coverage.lengthRatio * 100)}%`;
             panel.querySelector('.story-rewriter-status').textContent = `${session.coverageRepairReason}，正在进行完整性修复…`;
             const repaired = await runRevision(buildRevisionCoverageRepairPrompt(revisionTask, coverage), '完整性修复');
             const repairedCoverage = assessRevisionCompleteness(baseline, repaired.assembled, effectivePlan);
@@ -2137,7 +2149,7 @@ async function generateCompleteRevision(panel, instruction) {
                 result = repaired;
                 coverage = repairedCoverage;
                 if (!repairedCoverage.complete) {
-                    session.coverageRepairReason = `完整性修复后候选仍只覆盖原文约 ${Math.round(repairedCoverage.lengthRatio * 100)}%`;
+                    session.coverageRepairReason = `完整性修复后候选长度仍仅为原文约 ${Math.round(repairedCoverage.lengthRatio * 100)}%`;
                 }
             } else {
                 result = initialResult;
@@ -2147,10 +2159,10 @@ async function generateCompleteRevision(panel, instruction) {
         }
         if (!coverage.complete) {
             const noProgressReason = ['no_progress', 'reasoning_only'].includes(result.stopReason)
-                ? '模型多次在正文开始前提前结束，插件已切换精简执行协议并停止无效续接；'
+                ? (result.segments ? '已收到部分文本，但后续续接未产生足够内容，已停止无效调用；' : '首段多次未返回足够的可用文本，已停止重试；')
                 : '';
             session.generationIncomplete = true;
-            session.generationIncompleteReason = `${noProgressReason}${session.coverageRepairReason || `候选只有原文约 ${Math.round(coverage.lengthRatio * 100)}%`}，不足以覆盖应保留内容。${noProgressReason ? '请检查当前连接的推理/正文路由，或更换更稳定的模型后重试。' : '请检查全文。'}`;
+            session.generationIncompleteReason = `${noProgressReason}${session.coverageRepairReason || `候选长度仅为原文约 ${Math.round(coverage.lengthRatio * 100)}%`}，未通过完整性检查。长度比不代表内容覆盖率；现有返回不足以确定是否为推理设置导致。`;
             session.generationSegments = result.segments;
             recordFailedAttempt(panel, result.assembled, instruction, {
                 reason: session.generationIncompleteReason,
@@ -2215,18 +2227,27 @@ async function generateCompleteRevision(panel, instruction) {
                 : result.stopReason === 'budget_exhausted'
                     ? '完整候选已用完本轮总预算，但未收到正文结束标记。请检查文章结尾。'
                     : ['no_progress', 'reasoning_only'].includes(result.stopReason)
-                        ? '模型多次在正文开始前提前结束，已停止无效续接。请检查文章结尾；若正文不完整，请检查当前连接的推理/正文路由，或更换更稳定的模型后重试。'
+                        ? '续接未产生足够的可用文本，已停止无效调用。请检查文章结尾；尚不能确定是模型输出还是解析问题。'
                     : '没有收到正文结束标记，模型可能已结束，也可能仍被截断。请检查文章结尾。'
             : !coverage.complete
                 ? `${session.coverageRepairReason || `候选只有原文约 ${Math.round(coverage.lengthRatio * 100)}%`}，不足以覆盖应保留内容。请检查全文。`
                 : '';
         session.generationSegments = result.segments;
         const disposition = classifyRevisionDisposition(result.assembled, result.complete, coverage);
+        session.reviewRepairReport = task.reviewReport ?? null;
         showCandidate(panel, result.assembled, instruction, {
             sourceStage: result.sourceStage,
             baseMode,
             baseline,
         });
+        if (task.reviewReport) {
+            const assessment = assessReviewRepair(task.reviewReport, baseline, session.candidate, effectivePlan);
+            generationLog('review_repair_validation', {
+                pendingIssues: assessment.pendingIssues, reviewIssues: assessment.issues.length,
+                protectedChanges: effect.protectedChanges, outcome: 'needs_confirmation',
+            }, session);
+            panel.querySelector('.story-rewriter-status').textContent = `候选已生成，尚未验证语义修复效果。${assessment.message} 计划外变化默认保留原文，请同时核对跨段一致性。`;
+        }
         generationLog('candidate_accepted', {
             stage: result.sourceStage,
             coverageRatio: coverage.lengthRatio,
@@ -2242,7 +2263,7 @@ async function generateCompleteRevision(panel, instruction) {
         }, session);
         session.pendingTask = null;
         session.pendingInstruction = '';
-        diagnosticStatus = session.generationIncomplete ? 'incomplete' : 'completed';
+        diagnosticStatus = session.generationIncomplete ? 'incomplete' : task.reviewReport ? 'review_needs_confirmation' : 'completed';
     } catch (error) {
         console.error('[Story Rewriter] complete revision failed', error);
         diagnosticStatus = isGenerationCancelled(error)
@@ -2273,6 +2294,7 @@ async function generateCompleteRevision(panel, instruction) {
                     disposition: !partialEffect.effective ? 'failed_no_effect' : disposition,
                 });
             } else {
+                session.reviewRepairReport = task.reviewReport ?? null;
                 showCandidate(panel, partial, instruction, {
                     sourceStage: session.partialStage,
                     baseMode,
@@ -2349,12 +2371,17 @@ async function reviewCandidate(panel) {
         session.repository = repository;
         const history = createChatChunks(state.context.chat, session.capture.messageId);
         const recent = history.filter(p => Number(p.sourceId) < session.capture.messageId && Number(p.sourceId) >= session.capture.messageId - 6);
-        let references = [...new Map([
+        let references = budgetReviewReferences([
             ...repository.retrieval.items, ...recent,
+        ], repository.retrievalBudget, state.settings.retrievalResults);
+        // Active requirements are already separate prompt fields; include them as citation
+        // sources too, outside the optional history budget.
+        const mandatoryReferences = [
             { id: 'review-long-term', text: requirements, sourceLabel: '用户检查要求' },
             { id: 'review-current', text: instruction, sourceLabel: '用户本轮要求' },
             { id: 'review-constraints', text: constraints, sourceLabel: '编辑约束' },
-        ].filter(p => p.text).map(p => [p.id, p])).values()];
+        ].filter(p => p.text);
+        references.push(...mandatoryReferences);
         const ensureCurrent = () => {
             if (session.cancelled) throw new GenerationCancelledError();
             if (state.session !== session || !panel.isConnected || !captureIsCurrent(session.capture)) throw new Error('检查对象已变化，本轮已停止。');
@@ -2389,7 +2416,11 @@ async function reviewCandidate(panel) {
                 maxResults: Math.max(1, Math.floor(state.settings.retrievalResults / searched.length)),
                 maxCharacters: Math.floor(state.settings.retrievalCharacters / searched.length),
             }).items);
-            references = [...new Map([...references, ...found].map(p => [p.id, p])).values()];
+            const cited = new Set(report.issues.map(issue => issue.evidenceId));
+            references = [...budgetReviewReferences([
+                ...references.filter(ref => cited.has(ref.id) && !ref.id.startsWith('review-')),
+                ...found, ...references.filter(ref => !ref.id.startsWith('review-')),
+            ], repository.retrievalBudget, state.settings.retrievalResults), ...mandatoryReferences];
             report = await inspect(report);
         }
         const plan = reviewPlan(report);
@@ -2432,13 +2463,19 @@ async function reviewCandidate(panel) {
             return;
         }
         const repairInstruction = buildReviewRepairInstruction(report, paragraphs);
+        const repairReferences = repairReviewReferences(report, references);
+        generationLog('retrieval_ready', {
+            stage: '修订证据', retrievalItems: repairReferences.length,
+            retrievalCharacters: repairReferences.reduce((sum, ref) => sum + ref.text.length, 0),
+        }, session);
         session.impactPlan = plan;
         session.pendingInstruction = repairInstruction;
         session.pendingTask = {
             editMode: 'full', influence: 'semantic', instruction: repairInstruction,
             constraints: [requirements, constraints].filter(Boolean).join('\n'),
             originalMessage: baseline, selectedText: '', paragraphs,
-            focusIds: plan.focusRegions.map(p => p.paragraphId), references,
+            focusIds: plan.focusRegions.map(p => p.paragraphId), references: repairReferences,
+            reviewReport: report,
         };
         ensureCurrent();
         handedOff = true;

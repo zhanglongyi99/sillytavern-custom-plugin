@@ -11,6 +11,23 @@ import {
     normalizeDiagnosticArchive,
 } from '../lib/diagnostics.js';
 
+test('persists retry strategy and review validation without saving story text', () => {
+    let archive = addDiagnosticRun(createDiagnosticArchive(), { id: 'review', startedAt: '2026-09-29T00:00:00.000Z' });
+    archive = appendDiagnosticEvent(archive, 'review', 'review_repair_validation', {
+        pendingIssues: 1, reviewIssues: 2, protectedChanges: 4,
+        recoveryStrategy: 'compact', maximumAttempts: 3,
+        progressAccepted: false, progressReason: 'insufficient_progress', minimumCharacters: 395,
+        story: 'private', report: { secret: true },
+    }, '2026-09-29T00:00:01.000Z');
+    const event = archive.runs[0].events[0];
+    assert.equal(event.pendingIssues, 1);
+    assert.equal(event.reviewIssues, 2);
+    assert.equal(event.recoveryStrategy, 'compact');
+    assert.equal(event.progressAccepted, false);
+    assert.equal(event.story, undefined);
+    assert.equal(event.report, undefined);
+});
+
 test('keeps only privacy-safe diagnostic fields and builds summaries', () => {
     let archive = addDiagnosticRun(createDiagnosticArchive(), {
         id: 'run-1',

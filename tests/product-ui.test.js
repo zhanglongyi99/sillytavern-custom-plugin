@@ -81,7 +81,8 @@ test('continues long plain-text revisions instead of wrapping the article in JSO
     assert.match(runtime, /buildRevisionDeliveryRecoveryPrompt/);
     assert.match(runtime, /if \(!progress\.accepted\)/);
     assert.match(runtime, /stopReason = progress\.reason === 'reasoning_only' \? 'reasoning_only' : 'no_progress'/);
-    assert.match(runtime, /停止无效续接/);
+    assert.match(runtime, /后续续接未产生足够内容/);
+    assert.doesNotMatch(runtime, /检查当前连接的推理\/正文路由/);
     assert.match(runtime, /assessRevisionCompleteness/);
     assert.match(runtime, /正在进行完整性修复/);
     assert.match(runtime, /session\.generationIncomplete && change\.kind === 'deleted'/);
