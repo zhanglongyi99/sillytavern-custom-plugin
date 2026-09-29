@@ -111,7 +111,7 @@ test('keeps Tavern context authoritative and degrades by capability', () => {
     assert.match(runtime, /session\.contextMode === 'local'/);
     assert.match(runtime, /getWorldInfoPrompt/);
     assert.doesNotMatch(runtime, /loadWorldInfo\?\./);
-    assert.match(runtime, /createHostJsonSchema\(schema, attempt\)/);
+    assert.match(runtime, /createHostJsonSchema\(schema, attempt, lastError\)/);
     assert.equal((runtime.match(/jsonSchema: hostSchema/g) ?? []).length, 2);
     assert.match(runtime, /createConservativeImpactPlan/);
     assert.doesNotMatch(runtime, /confidence >= 0\.85|confidence >= 0\.75/);

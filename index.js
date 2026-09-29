@@ -43,7 +43,7 @@ import {
 } from './lib/semantic.js';
 import { appendRevisionSwipe } from './lib/swipe.js';
 import { diffInline } from './lib/inline-diff.js';
-import { parseStructuredResponse, structuredFailureMessage, structuredRetryHint, createHostJsonSchema } from './lib/structured-response.js';
+import { parseStructuredResponse, structuredFailureMessage, structuredRetryHint, createHostJsonSchema, isSchemaUnsupported, structuredOutputBudget } from './lib/structured-response.js';
 import { REVIEW_SCHEMA, buildReviewPrompt, parseReview, reviewPlan, buildReviewRepairInstruction, budgetReviewReferences, repairReviewReferences, assessReviewRepair, reviewEvidence } from './lib/review.js';
 import {
     addDiagnosticRun,
@@ -62,7 +62,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.8.6';
+const EXTENSION_VERSION = '0.8.7';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -1342,19 +1342,24 @@ async function buildSemanticRepository(session, instruction, constraints) {
 async function generateStructured(prompt, schema, responseLength, parser, session, stageLabel) {
     let currentPrompt = prompt;
     let lastError;
+    const failures = [];
     for (let attempt = 0; attempt < 2; attempt++) {
         if (session.cancelled) throw new GenerationCancelledError();
-        const hostSchema = createHostJsonSchema(schema, attempt);
+        const hostSchema = createHostJsonSchema(schema, attempt, lastError);
         const generationInterface = session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function'
             ? 'quiet' : 'raw';
         const promptTokens = await countTokens(currentPrompt);
-        const response = await runGenerationCall(session, stageLabel, () => {
+        const outputBudget = structuredOutputBudget(responseLength, lastError, promptTokens, session.activeLimits);
+        if (outputBudget < 512) throw new Error(`${stageLabel}输出预算不足，已停止调用。${failures.join('；')}`);
+        let response;
+        try {
+        response = await runGenerationCall(session, stageLabel, () => {
             if (session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function') {
                 return state.context.generateQuietPrompt({
                     quietPrompt: currentPrompt,
                     quietToLoud: false,
                     skipWIAN: false,
-                    responseLength,
+                    responseLength: outputBudget,
                     jsonSchema: hostSchema,
                     removeReasoning: false,
                     trimToSentence: false,
@@ -1362,21 +1367,32 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
             }
             if (typeof state.context.generateRaw !== 'function') throw new Error('当前 SillyTavern 不提供可用的后台生成接口。');
             return state.context.generateRaw({
-                systemPrompt: attempt === 0
+                systemPrompt: hostSchema
                     ? 'You are a source-grounded fiction editing agent. Follow the JSON schema and never reveal hidden reasoning.'
                     : 'You are a source-grounded fiction editing agent. Return one compact JSON object between the requested boundary markers and never reveal hidden reasoning.',
                 prompt: currentPrompt,
-                responseLength,
+                responseLength: outputBudget,
                 jsonSchema: hostSchema,
                 trimNames: false,
             });
         }, {
             attempt: attempt + 1,
-            responseLength,
+            responseLength: outputBudget,
+            retryReason: lastError,
             promptTokens,
             pluginPromptCharacters: currentPrompt.length,
             pluginPromptFingerprint: hashText(currentPrompt),
         });
+        } catch (error) {
+            if (isGenerationCancelled(error) || !isSchemaUnsupported(error) || !hostSchema) throw error;
+            lastError = 'schema_unsupported';
+            failures.push(`第 ${attempt + 1} 次：${structuredFailureMessage(lastError)}`);
+            if (attempt === 0) {
+                panelStatusForStructuredRetry(session, stageLabel, lastError);
+                currentPrompt = `${prompt}\n\n仅返回完整 JSON 报告，不输出解释或围栏。`;
+            }
+            continue;
+        }
         if (session.cancelled) throw new GenerationCancelledError();
         const parsed = parseStructuredResponse(response, parser, removeConfiguredReasoning);
         generationLog('structured_parsed', {
@@ -1386,18 +1402,19 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
         }, session);
         if (parsed.value !== null) return parsed.value;
         lastError = parsed.metadata.errorCode;
+        failures.push(`第 ${attempt + 1} 次：${structuredFailureMessage(lastError)}`);
         if (attempt === 0) {
             panelStatusForStructuredRetry(session, stageLabel, lastError);
-            currentPrompt = `${prompt}\n\n<format_retry>${structuredRetryHint(lastError)}重新执行原任务，在 <story_rewriter_json_begin> 与 <story_rewriter_json_end> 之间只放一个完整、紧凑的 JSON 对象，不要代码围栏或解释。</format_retry>`;
+            currentPrompt = `${prompt}\n\n<format_retry>${structuredRetryHint(lastError)}重新执行原任务，只返回一个完整、紧凑的 JSON 对象，不要边界标记、代码围栏或解释。</format_retry>`;
         }
     }
-    throw new Error(`${stageLabel}两次尝试均未得到有效报告；最后一次：${structuredFailureMessage(lastError)}。本轮检查或分析未完成，未据此修订正文。具体原因请查看诊断记录，不能仅凭此错误判断推理设置或输出额度。`);
+    throw new Error(`${stageLabel}两次尝试均未得到有效报告；${failures.join('；')}。本轮检查或分析未完成，未据此修订正文。具体原因请查看诊断记录，不能仅凭此错误判断推理设置或输出额度。`);
 }
 
 function panelStatusForStructuredRetry(session, stage, code) {
     if (state.session !== session) return;
     const status = state.panel?.querySelector('.story-rewriter-status');
-    if (status) status.textContent = `${stage}：${structuredFailureMessage(code)}；正在进行唯一一次格式兼容重试…`;
+    if (status) status.textContent = `${stage}：${structuredFailureMessage(code)}；${code === 'schema_unsupported' ? '切换兼容协议' : code === 'incomplete_json' ? '保留协议，压缩报告并按可用额度调整输出预算' : '保留协议重新请求报告'}（最多重试一次）…`;
 }
 
 async function generatePlain(prompt, responseLength, session, metadata = {}) {

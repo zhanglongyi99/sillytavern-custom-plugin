@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseStructuredResponse, structuredRetryHint, structuredFailureMessage, createHostJsonSchema } from '../lib/structured-response.js';
+import { parseStructuredResponse, structuredRetryHint, structuredFailureMessage, createHostJsonSchema, structuredOutputBudget, isSchemaUnsupported } from '../lib/structured-response.js';
 import { parseImpactResponse } from '../lib/semantic.js';
 
 const report = '{"objective":"检查","queries":[],"issues":[]}';
@@ -34,7 +34,8 @@ test('host JSON passthrough preserves malformed and fenced responses without mut
     const passthrough = createHostJsonSchema(schema, 0);
     assert.equal(passthrough.returnInvalid, true);
     assert.equal(schema.returnInvalid, undefined);
-    assert.equal(createHostJsonSchema(schema, 1), null);
+    assert.equal(createHostJsonSchema(schema, 1, 'incomplete_json').returnInvalid, true);
+    assert.equal(createHostJsonSchema(schema, 1, 'schema_unsupported'), null);
     const host = (text, options) => {
         try { return JSON.stringify(JSON.parse(text)); }
         catch { return options?.returnInvalid ? text : '{}'; }
