@@ -43,7 +43,7 @@ import {
 } from './lib/semantic.js';
 import { appendRevisionSwipe } from './lib/swipe.js';
 import { diffInline } from './lib/inline-diff.js';
-import { parseStructuredResponse, structuredFailureMessage, structuredRetryHint } from './lib/structured-response.js';
+import { parseStructuredResponse, structuredFailureMessage, structuredRetryHint, createHostJsonSchema } from './lib/structured-response.js';
 import { REVIEW_SCHEMA, buildReviewPrompt, parseReview, reviewPlan, buildReviewRepairInstruction, budgetReviewReferences, repairReviewReferences, assessReviewRepair, reviewEvidence } from './lib/review.js';
 import {
     addDiagnosticRun,
@@ -62,7 +62,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.8.4';
+const EXTENSION_VERSION = '0.8.5';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -283,6 +283,7 @@ function generationLog(event, metadata = {}, session = state.session) {
     'retryAttempt', 'retryReason', 'recoveryStrategy', 'maximumAttempts',
     'progressAccepted', 'progressReason', 'minimumCharacters', 'pendingIssues', 'reviewIssues',
     'interfaceCharacters', 'cleanedCharacters', 'configuredCharacters',
+    'generationInterface', 'schemaReturnInvalid', 'hostTextCleanupPossible',
 ];
     const safe = Object.fromEntries(allowed
         .filter(key => metadata[key] !== undefined)
@@ -1329,6 +1330,9 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
     let lastError;
     for (let attempt = 0; attempt < 2; attempt++) {
         if (session.cancelled) throw new GenerationCancelledError();
+        const hostSchema = createHostJsonSchema(schema, attempt);
+        const generationInterface = session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function'
+            ? 'quiet' : 'raw';
         const promptTokens = await countTokens(currentPrompt);
         const response = await runGenerationCall(session, stageLabel, () => {
             if (session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function') {
@@ -1337,7 +1341,7 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
                     quietToLoud: false,
                     skipWIAN: false,
                     responseLength,
-                    jsonSchema: attempt === 0 ? schema : null,
+                    jsonSchema: hostSchema,
                     removeReasoning: false,
                     trimToSentence: false,
                 });
@@ -1349,7 +1353,7 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
                     : 'You are a source-grounded fiction editing agent. Return one compact JSON object between the requested boundary markers and never reveal hidden reasoning.',
                 prompt: currentPrompt,
                 responseLength,
-                jsonSchema: attempt === 0 ? schema : null,
+                jsonSchema: hostSchema,
                 trimNames: false,
             });
         }, {
@@ -1361,7 +1365,11 @@ async function generateStructured(prompt, schema, responseLength, parser, sessio
         });
         if (session.cancelled) throw new GenerationCancelledError();
         const parsed = parseStructuredResponse(response, parser, removeConfiguredReasoning);
-        generationLog('structured_parsed', { stage: stageLabel, attempt: attempt + 1, ...parsed.metadata }, session);
+        generationLog('structured_parsed', {
+            stage: stageLabel, attempt: attempt + 1, ...parsed.metadata,
+            generationInterface, schemaReturnInvalid: Boolean(hostSchema?.returnInvalid),
+            hostTextCleanupPossible: !hostSchema,
+        }, session);
         if (parsed.value !== null) return parsed.value;
         lastError = parsed.metadata.errorCode;
         if (attempt === 0) {

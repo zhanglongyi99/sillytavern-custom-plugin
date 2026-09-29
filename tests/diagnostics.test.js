@@ -18,6 +18,7 @@ test('persists retry strategy and review validation without saving story text', 
         recoveryStrategy: 'compact', maximumAttempts: 3,
         progressAccepted: false, progressReason: 'insufficient_progress', minimumCharacters: 395,
         interfaceCharacters: 200, cleanedCharacters: 100, configuredCharacters: 0,
+        generationInterface: 'quiet', schemaReturnInvalid: true, hostTextCleanupPossible: false,
         story: 'private', report: { secret: true },
     }, '2026-09-29T00:00:01.000Z');
     const event = archive.runs[0].events[0];
@@ -28,6 +29,9 @@ test('persists retry strategy and review validation without saving story text', 
     assert.equal(event.interfaceCharacters, 200);
     assert.equal(event.cleanedCharacters, 100);
     assert.equal(event.configuredCharacters, 0);
+    assert.equal(event.schemaReturnInvalid, true);
+    assert.equal(event.hostTextCleanupPossible, false);
+    assert.equal(event.generationInterface, 'quiet');
     assert.equal(event.story, undefined);
     assert.equal(event.report, undefined);
 });

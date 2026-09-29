@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseStructuredResponse, structuredRetryHint, structuredFailureMessage } from '../lib/structured-response.js';
+import { parseStructuredResponse, structuredRetryHint, structuredFailureMessage, createHostJsonSchema } from '../lib/structured-response.js';
 import { parseImpactResponse } from '../lib/semantic.js';
 
 const report = '{"objective":"检查","queries":[],"issues":[]}';
@@ -20,13 +20,33 @@ test('empty and reasoning-only responses are not valid empty reviews', () => {
         ['<think>' + report + '</think>', 'empty_after_cleanup'],
         ['<analysis>unfinished ' + report, 'empty_after_cleanup'],
         ['抱歉', 'non_json'], ['{"objective":"检查"', 'incomplete_json'],
-        ['{}', 'invalid_report'],
+        ['{}', 'empty_object'],
     ]) {
         const result = parseStructuredResponse(text, parseImpactResponse);
         assert.equal(result.value, null);
         assert.equal(result.metadata.errorCode, code);
         assert.ok(structuredFailureMessage(code));
     }
+});
+
+test('host JSON passthrough preserves malformed and fenced responses without mutating schema', () => {
+    const schema = Object.freeze({ name: 'review', strict: true, value: {} });
+    const passthrough = createHostJsonSchema(schema, 0);
+    assert.equal(passthrough.returnInvalid, true);
+    assert.equal(schema.returnInvalid, undefined);
+    assert.equal(createHostJsonSchema(schema, 1), null);
+    const host = (text, options) => {
+        try { return JSON.stringify(JSON.parse(text)); }
+        catch { return options?.returnInvalid ? text : '{}'; }
+    };
+    const fenced = '```json\n' + report + '\n```';
+    assert.equal(host(fenced, schema), '{}');
+    assert.equal(parseStructuredResponse(host(fenced, passthrough), parseImpactResponse).value.objective, '检查');
+    const broken = '{"objective":"unfinished';
+    assert.equal(parseStructuredResponse(host(broken, passthrough), parseImpactResponse).metadata.errorCode, 'incomplete_json');
+    assert.equal(host(report, passthrough), report);
+    assert.equal(host('', passthrough), '');
+    assert.equal(parseStructuredResponse(host('{}', passthrough), parseImpactResponse).metadata.errorCode, 'empty_object');
 });
 test('configured fallback is measured and does not expose removed text', () => {
     const result = parseStructuredResponse('custom wrapper', parseImpactResponse, () => report);
