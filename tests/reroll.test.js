@@ -1,0 +1,52 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+
+const runtime = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+const source = runtime.slice(runtime.indexOf('async function rerollTurn('), runtime.indexOf('async function generateCandidate('));
+function harness(outcome, kind = 'complete') {
+    const turn = { candidate: 'bad second result', generationRequest: { kind, instruction: 'second request',
+        task: { originalMessage: 'accepted first draft' }, baseline: 'accepted first draft', baseMode: 'current', impactPlan: {} } };
+    const session = { turns: [turn], requirements: ['first', 'second'], candidate: 'current chosen draft',
+        proposalCandidate: 'current proposal', acceptedChangeIds: new Set(['C001']), scopeMode: 'smart', capture: {} };
+    const state = { session };
+    const fields = { '.story-rewriter-instruction': { value: 'unsent third request' },
+        '.story-rewriter-candidate': { value: session.candidate }, '.story-rewriter-status': { textContent: '' } };
+    const panel = { isConnected: true, querySelector: key => fields[key] };
+    let seen;
+    const generate = async (panel, request) => {
+        seen = kind === 'complete' ? structuredClone(session.pendingTask) : structuredClone(request.task);
+        if (outcome === 'failure') { session.candidate = 'partial'; session.generationBaseline = 'wrong'; return; }
+        if (outcome === 'cancel') { session.cancelled = true; return; }
+        session.candidate = 'rerolled draft'; session.turns.push({ candidate: session.candidate });
+        session.requirements.push('duplicate'); fields['.story-rewriter-instruction'].value = '';
+    };
+    const reroll = new Function('state', 'cloneValue', 'captureIsCurrent', 'captureCandidateSnapshot', 'startGenerationSession',
+        'generatePreciseCandidate', 'generateCompleteRevision', 'renderImpactPlan', 'renderAudit', 'renderSessionTurns',
+        source + '; return rerollTurn;')(state, structuredClone, () => true, () => {}, () => {}, generate, generate, () => {}, () => {}, () => {});
+    return { session, fields, run: () => reroll(panel, turn, 1), seen: () => seen };
+}
+test('reroll reuses the saved input, preserves old candidate and unsent instruction', async () => {
+    for (const kind of ['complete', 'precise']) {
+        const h = harness('success', kind); await h.run();
+        assert.equal(h.seen().originalMessage, 'accepted first draft');
+        assert.equal(h.session.turns.length, 2);
+        assert.equal(h.session.turns[0].candidate, 'bad second result');
+        assert.equal(h.fields['.story-rewriter-instruction'].value, 'unsent third request');
+        assert.deepEqual(h.session.requirements, ['first', 'second']);
+        assert.equal(h.session.rerollRequest, null);
+    }
+});
+test('failure and cancellation restore candidate and exact decisions', async () => {
+    for (const outcome of ['failure', 'cancel']) {
+        const h = harness(outcome); await h.run();
+        assert.equal(h.session.candidate, 'current chosen draft');
+        assert.deepEqual([...h.session.acceptedChangeIds], ['C001']);
+        assert.equal(h.session.turns.length, 1);
+        assert.equal(h.fields['.story-rewriter-instruction'].value, 'unsent third request');
+    }
+});
+test('busy generation cannot start a concurrent reroll', async () => {
+    const h = harness('success'); h.session.generationInProgress = true; await h.run();
+    assert.equal(h.seen(), undefined);
+});

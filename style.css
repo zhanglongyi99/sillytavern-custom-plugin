@@ -327,6 +327,15 @@
     margin-top: 14px;
 }
 
+.story-rewriter-turn .story-rewriter-reroll,
+.story-rewriter-turn .story-rewriter-restore-candidate {
+    display: inline-flex;
+    width: auto;
+    min-width: max-content;
+    white-space: nowrap;
+    margin: 0.25rem 0.5rem 0.25rem 0;
+}
+
 .story-rewriter-turn {
     padding: 9px 11px;
     background: rgb(255 255 255 / 4%);

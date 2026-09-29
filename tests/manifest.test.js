@@ -18,6 +18,6 @@ test('declares the standard SillyTavern frontend extension entry points', () => 
 });
 
 test('publishes the adaptive body-delivery recovery release metadata', () => {
-    assert.equal(manifest.version, '0.8.5');
+    assert.equal(manifest.version, '0.8.6');
     assert.equal(manifest.display_name, '故事改写');
 });

@@ -62,7 +62,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.8.5';
+const EXTENSION_VERSION = '0.8.6';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -789,7 +789,8 @@ function renderSessionTurns(panel) {
         const card = document.createElement('article');
         card.className = 'story-rewriter-turn';
         const requestLabel = document.createElement('strong');
-        requestLabel.textContent = `第 ${index + 1} 轮要求`;
+        requestLabel.textContent = `第 ${turn.roundNumber ?? index + 1} 轮要求`;
+        if (turn.rerollOf) requestLabel.textContent = `重 Roll · ${turn.rerollOf}`;
         const request = document.createElement('p');
         request.textContent = turn.instruction;
         const resultLabel = document.createElement('strong');
@@ -825,9 +826,19 @@ function renderSessionTurns(panel) {
                 switchWorkspaceView(panel, 'changes');
             }
             updateGenerationBasis(panel);
-            panel.querySelector('.story-rewriter-status').textContent = `已恢复第 ${index + 1} 轮候选并重新审计。`;
+            panel.querySelector('.story-rewriter-status').textContent = `已恢复${turn.rerollOf ? ` ${turn.rerollOf} 的重 Roll` : `第 ${turn.roundNumber ?? index + 1} 轮`}候选并重新审计。`;
         });
         card.append(requestLabel, request, resultLabel, result, restore);
+        if (turn.generationRequest) {
+            const reroll = document.createElement('button');
+            reroll.type = 'button';
+            reroll.className = 'menu_button story-rewriter-reroll';
+            reroll.textContent = '重试本轮（重 Roll）';
+            reroll.title = '使用本轮生成前的工作稿和相同要求，保留旧候选';
+            reroll.disabled = Boolean(state.session.generationInProgress);
+            reroll.addEventListener('click', () => rerollTurn(panel, turn, index));
+            card.append(reroll);
+        }
         host.append(card);
     }
     host.hidden = state.session.turns.length === 0;
@@ -1090,10 +1101,10 @@ function buildSessionTask(instruction, panel) {
     };
 }
 
-async function generatePreciseCandidate(panel) {
+async function generatePreciseCandidate(panel, replay = null) {
     const session = state.session;
     const instructionInput = panel.querySelector('.story-rewriter-instruction');
-    const instruction = instructionInput.value.trim();
+    const instruction = replay?.instruction ?? instructionInput.value.trim();
     if (!instruction) {
         panel.querySelector('.story-rewriter-status').textContent = '请先输入本轮修改要求。';
         return;
@@ -1112,7 +1123,7 @@ async function generatePreciseCandidate(panel) {
     let diagnosticStatus = 'failed';
     try {
         await syncContextSummary(panel);
-        const task = buildSessionTask(instruction, panel);
+        const task = replay ? cloneValue(replay.task) : buildSessionTask(instruction, panel);
         const requestReplacement = async (useSchema, effectRetry = false) => {
             const fallbackContract = useSchema ? '' : '\n\n当前后端可能不支持 JSON Schema。只在 <story_rewriter_replacement_begin> 和 <story_rewriter_replacement_end> 之间输出替换正文，不要 JSON、解释或代码围栏。';
             const effectContract = effectRetry ? [
@@ -1204,7 +1215,10 @@ async function generatePreciseCandidate(panel) {
         session.constraints = task.constraints;
         session.requirements.push(instruction);
         if (session.requirements.length > MAX_SESSION_TURNS) session.requirements.shift();
-        session.turns.push({ instruction, candidate, createdAt: new Date().toISOString() });
+        session.turns.push({ instruction, candidate, createdAt: new Date().toISOString(),
+            roundNumber: session.rerollRound ?? Math.max(0, ...session.turns.map((t, i) => t.roundNumber ?? i + 1)) + 1,
+            generationRequest: { kind: 'precise', instruction, task: cloneValue(task) },
+            rerollOf: session.rerollLabel ?? null });
         if (session.turns.length > MAX_SESSION_TURNS) session.turns.shift();
         panel.querySelector('.story-rewriter-candidate').value = candidate;
         panel.querySelector('.story-rewriter-preview').hidden = false;
@@ -1891,7 +1905,7 @@ function showCandidate(panel, candidate, instruction, metadata = {}) {
     const session = state.session;
     const baseMode = metadata.baseMode || session.pendingBaseMode || 'original';
     const baseline = String(metadata.baseline ?? session.generationBaseline ?? session.capture.messageText);
-    if (baseMode === 'original') {
+    if (baseMode === 'original' && !session.rerollLabel) {
         session.requirements = [];
         session.turns = [];
         session.failedAttempts = [];
@@ -1910,9 +1924,12 @@ function showCandidate(panel, candidate, instruction, metadata = {}) {
     session.requirements.push(instruction);
     if (session.requirements.length > MAX_SESSION_TURNS) session.requirements.shift();
     session.turns.push({
+        roundNumber: session.rerollRound ?? Math.max(0, ...session.turns.map((t, i) => t.roundNumber ?? i + 1)) + 1,
         instruction,
         candidate: actualCandidate,
         rawCandidate: candidate,
+        generationRequest: cloneValue(session.activeGenerationRequest ?? null),
+        rerollOf: session.rerollLabel ?? null,
         reviewRepairReport: session.reviewRepairReport ? cloneValue(session.reviewRepairReport) : null,
         sourceStage: metadata.sourceStage || session.activeRevisionStage || '完整正文',
         baseMode,
@@ -1983,7 +2000,7 @@ async function generateCompleteRevision(panel, instruction) {
         updateContextSummary(panel);
         const originalTokens = await countTokens(baseline);
         const desiredResponseLength = desiredRevisionTokens(originalTokens);
-        const revisionHistory = resolveRevisionHistory(
+        const revisionHistory = session.rerollRequest?.history ?? resolveRevisionHistory(
             baseMode,
             panel.querySelector('.story-rewriter-candidate').value.trim() || session.candidate,
             session.requirements.slice(-MAX_SESSION_TURNS),
@@ -1993,6 +2010,8 @@ async function generateCompleteRevision(panel, instruction) {
             impactPlan: effectivePlan,
             ...revisionHistory,
         };
+        session.activeGenerationRequest = { kind: 'complete', instruction, task: cloneValue(task),
+            history: cloneValue(revisionHistory), impactPlan: cloneValue(effectivePlan), baseMode, baseline };
         const maxContext = limits.maxContext;
         const singleResponseLimit = limits.maxResponse || desiredResponseLength;
         const runRevision = async (initialPrompt, stageLabel) => {
@@ -2279,7 +2298,7 @@ async function generateCompleteRevision(panel, instruction) {
         diagnosticStatus = isGenerationCancelled(error)
             ? 'cancelled'
             : isGenerationTimeout(error) ? 'timeout' : 'failed';
-        const partial = String(session.partialCandidate ?? '').trim();
+        const partial = session.rerollLabel ? '' : String(session.partialCandidate ?? '').trim();
         if (partial && state.session === session && panel.isConnected) {
             const partialCoverage = assessRevisionCompleteness(baseline, partial, effectivePlan);
             const partialEffect = assessRevisionEffect(baseline, partial, effectivePlan);
@@ -2649,6 +2668,67 @@ async function generateSemanticCandidate(panel) {
         }
     }
     await generateCompleteRevision(panel, instruction);
+}
+
+async function rerollTurn(panel, turn, index) {
+    const session = state.session;
+    if (!session || session.generationInProgress || session.rerollLabel || !turn.generationRequest) return;
+    if (!captureIsCurrent(session.capture)) {
+        panel.querySelector('.story-rewriter-status').textContent = '原消息、聊天或 Swipe 已变化，请重新打开工作台。';
+        return;
+    }
+    const request = cloneValue(turn.generationRequest);
+    const input = panel.querySelector('.story-rewriter-instruction');
+    const unsent = input.value;
+    const saved = {};
+    for (const key of ['candidate', 'proposalCandidate', 'impactPlan', 'reviewPlan', 'reviewBaseline',
+        'generationBaseline', 'reviewRepairReport', 'generationIncomplete', 'generationIncompleteReason',
+        'generationSegments', 'repository', 'acceptedChangeIds', 'reviewTouchedIds', 'reviewAudit', 'audit',
+        'pendingTask', 'pendingInstruction', 'pendingBaseMode', 'candidateSnapshot', 'activeGenerationRequest',
+        'forceLoadedAttemptId', 'constraints']) saved[key] = session[key];
+    saved.requirements = [...session.requirements];
+    saved.turns = [...session.turns];
+    const oldLast = session.turns.at(-1);
+    session.rerollRound = turn.roundNumber ?? index + 1;
+    session.rerollLabel = turn.rerollOf || `第 ${session.rerollRound} 轮`;
+    session.rerollRequest = request;
+    try {
+        if (request.kind === 'precise') {
+            await generatePreciseCandidate(panel, request);
+        } else {
+            captureCandidateSnapshot(session);
+            session.pendingTask = cloneValue(request.task);
+            session.pendingInstruction = request.instruction;
+            session.pendingBaseMode = request.baseMode;
+            session.generationBaseline = request.baseline;
+            session.impactPlan = cloneValue(request.impactPlan);
+            startGenerationSession(session);
+            await generateCompleteRevision(panel, request.instruction);
+        }
+    } catch (error) {
+        if (state.session === session && panel.isConnected) panel.querySelector('.story-rewriter-status').textContent = `重 Roll 失败：${error.message ?? error}`;
+    } finally {
+        if (state.session === session && panel.isConnected) {
+            const failed = session.turns.at(-1) === oldLast || session.cancelled || (request.kind === 'complete' && session.generationIncomplete);
+            if (failed) {
+                Object.assign(session, saved);
+                panel.querySelector('.story-rewriter-candidate').value = session.candidate;
+                if (session.scopeMode !== 'selection' && session.reviewAudit) {
+                    renderImpactPlan(panel);
+                    renderAudit(panel);
+                }
+                renderSessionTurns(panel);
+                panel.querySelector('.story-rewriter-status').textContent += ' 重 Roll 未产生完整新候选，已保留原候选及选择。';
+            } else {
+                session.requirements = saved.requirements;
+                panel.querySelector('.story-rewriter-status').textContent += ' 本轮重 Roll 已完成，旧候选仍可恢复。';
+            }
+            input.value = unsent;
+        }
+        session.rerollLabel = null;
+        session.rerollRound = null;
+        session.rerollRequest = null;
+    }
 }
 
 async function generateCandidate(panel) {
