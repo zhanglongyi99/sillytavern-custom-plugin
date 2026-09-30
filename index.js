@@ -63,7 +63,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.8.9';
+const EXTENSION_VERSION = '0.8.10';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -1827,9 +1827,20 @@ function renderAudit(panel) {
             context.className = 'story-rewriter-diff-card story-rewriter-unchanged-context';
             const caption = document.createElement('strong');
             caption.textContent = `${formatChangeRange(row)} · 未修改`;
-            const content = document.createElement('pre');
-            content.textContent = row.text;
-            context.append(caption, content);
+            const pair = document.createElement('div');
+            pair.className = 'story-rewriter-diff-pair';
+            for (const [label, version] of [['原文', 'original'], ['候选', 'candidate']]) {
+                const section = document.createElement('section');
+                section.className = `story-rewriter-diff-version is-${version}`;
+                const labelNode = document.createElement('span');
+                labelNode.className = 'story-rewriter-diff-caption';
+                labelNode.textContent = `${label} · ${row.text.length} 字`;
+                const content = document.createElement('pre');
+                content.textContent = row.text;
+                section.append(labelNode, content);
+                pair.append(section);
+            }
+            context.append(caption, pair);
             list.append(context);
             continue;
         }
