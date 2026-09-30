@@ -682,6 +682,16 @@ details.story-rewriter-diff-version summary::after {
     font: inherit;
 }
 
+.story-rewriter-unchanged-context {
+    border-left-color: #899399;
+    background: rgb(30 35 40 / 85%);
+}
+
+.story-rewriter-unchanged-context[hidden] {
+    display: none;
+}
+
+.story-rewriter-full-toggle[aria-pressed="true"],
 .story-rewriter-highlight-toggle[aria-pressed="true"] {
     outline: 2px solid currentColor;
     outline-offset: -2px;

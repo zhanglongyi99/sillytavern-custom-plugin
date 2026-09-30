@@ -18,6 +18,6 @@ test('declares the standard SillyTavern frontend extension entry points', () => 
 });
 
 test('publishes the reroll reviewable-candidate release metadata', () => {
-    assert.equal(manifest.version, '0.8.8');
+    assert.equal(manifest.version, '0.8.9');
     assert.equal(manifest.display_name, '故事改写');
 });

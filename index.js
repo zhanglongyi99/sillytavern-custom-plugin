@@ -13,6 +13,7 @@ import {
     assessRevisionSegmentProgress,
     auditRevision,
     buildImpactPrompt,
+    buildReviewDisplayRows,
     buildRevisionContinuationPrompt,
     buildRevisionCoverageRepairPrompt,
     buildRevisionDeliveryRecoveryPrompt,
@@ -62,7 +63,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.8.8';
+const EXTENSION_VERSION = '0.8.9';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -88,6 +89,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     generationTimeoutSeconds: 180,
     diagnosticsEnabled: true,
     highlightChanges: true,
+    showFullReview: false,
     reviewRequirements: '',
 });
 
@@ -1657,6 +1659,11 @@ function updateReviewSelectionPresentation(panel) {
 
 function applyReviewFilter(panel) {
     const filter = state.session?.reviewFilter ?? 'all';
+    const showFull = state.settings.showFullReview === true && filter === 'all';
+    panel.querySelectorAll('.story-rewriter-unchanged-context').forEach(card => { card.hidden = !showFull; });
+    panel.querySelectorAll('.story-rewriter-full-toggle').forEach(button => {
+        button.setAttribute('aria-pressed', String(showFull));
+    });
     panel.querySelectorAll('.story-rewriter-diff-card[data-change-id]').forEach(card => {
         card.hidden = filter === 'planned'
             ? card.dataset.classification === 'protected'
@@ -1775,6 +1782,10 @@ function renderAudit(panel) {
     for (const [label, filter] of [['全部', 'all'], ['计划内', 'planned'], ['疑似越界', 'protected']]) {
         const button = addAction(label, () => {
             state.session.reviewFilter = filter;
+            if (filter !== 'all') {
+                state.settings.showFullReview = false;
+                saveSettings();
+            }
             applyReviewFilter(panel);
         }, 'story-rewriter-filter-button');
         button.dataset.reviewFilter = filter;
@@ -1793,6 +1804,13 @@ function renderAudit(panel) {
     }, 'story-rewriter-highlight-toggle');
     highlight.setAttribute('aria-pressed', String(state.settings.highlightChanges !== false));
     highlight.title = '显示具体字词和标点变化：原文红色删除线，候选绿色下划线；仅影响显示';
+    const full = addAction('显示全文', () => {
+        state.settings.showFullReview = !state.settings.showFullReview;
+        if (state.settings.showFullReview) session.reviewFilter = 'all';
+        saveSettings();
+        applyReviewFilter(panel);
+    }, 'story-rewriter-full-toggle');
+    full.title = '按原文顺序显示修改块之间未修改的段落；仅影响显示，不改变采用选择';
     addAction('仅采用计划内', () => setReviewAcceptance(panel, change => change.classification !== 'protected'));
     addAction('全部采用', () => setReviewAcceptance(panel, () => true));
     addAction('全部保留原文', () => setReviewAcceptance(panel, () => false));
@@ -1803,7 +1821,19 @@ function renderAudit(panel) {
     const list = document.createElement('div');
     list.className = 'story-rewriter-review-list';
     const names = { focus: '强修改', linked: '关联修改', transition: '衔接调整', protected: '疑似越界' };
-    for (const change of review.changes) {
+    for (const row of buildReviewDisplayRows(session.reviewBaseline || session.capture.messageText, review)) {
+        if (row.kind === 'unchanged') {
+            const context = document.createElement('article');
+            context.className = 'story-rewriter-diff-card story-rewriter-unchanged-context';
+            const caption = document.createElement('strong');
+            caption.textContent = `${formatChangeRange(row)} · 未修改`;
+            const content = document.createElement('pre');
+            content.textContent = row.text;
+            context.append(caption, content);
+            list.append(context);
+            continue;
+        }
+        const change = row.change;
         const card = document.createElement('article');
         card.className = `story-rewriter-diff-card is-${change.classification}`;
         card.dataset.changeId = change.id;
