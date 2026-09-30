@@ -285,7 +285,7 @@ function generationLog(event, metadata = {}, session = state.session) {
         'limitSource', 'outcome', 'baseMode', 'disposition',
         'baselineFingerprint', 'candidateFingerprint', 'equivalent',
         'effectiveChange', 'similarity', 'changedCharacters',
-        'focusChanges', 'plannedChanges', 'protectedChanges',
+        'focusChanges', 'plannedChanges', 'protectedChanges', 'unverifiedChanges',
     'retryAttempt', 'retryReason', 'recoveryStrategy', 'maximumAttempts',
     'progressAccepted', 'progressReason', 'minimumCharacters', 'pendingIssues', 'reviewIssues',
     'interfaceCharacters', 'cleanedCharacters', 'configuredCharacters',
@@ -1482,6 +1482,7 @@ function logRevisionEffectAssessment(session, baseline, candidate, assessment, m
         focusChanges: assessment.focusChanges,
         plannedChanges: assessment.plannedChanges,
         protectedChanges: assessment.protectedChanges,
+        unverifiedChanges: assessment.unverifiedChanges,
         retryAttempt: metadata.retryAttempt,
         retryReason: metadata.retryReason,
     }, session);
@@ -1513,12 +1514,14 @@ function renderImpactPlan(panel) {
 
     const summary = document.createElement('p');
     summary.className = 'story-rewriter-impact-summary';
-    summary.textContent = `目标：${plan.objective || '按本轮要求重构'}；强修改 ${plan.focusRegions.length} 段，关联 ${plan.linkedRegions.length} 段，衔接 ${plan.transitionRegions.length} 段。`;
+    summary.textContent = plan.fallback
+        ? `目标：${plan.objective || '按本轮要求重构'}；修改范围未确认。`
+        : `目标：${plan.objective || '按本轮要求重构'}；强修改 ${plan.focusRegions.length} 段，关联 ${plan.linkedRegions.length} 段，衔接 ${plan.transitionRegions.length} 段。`;
     host.append(summary);
     if (plan.fallback) {
         const fallback = document.createElement('p');
         fallback.className = 'story-rewriter-warning';
-        fallback.textContent = '模型的结构化分析不可用，当前采用本地保守范围。置信度不会决定替换权限，请在逐块确认中选择。';
+        fallback.textContent = '修改范围未确认：影响分析未完成，备用生成范围不代表修改授权；未确认变化默认保留原文，请逐块确认或重 Roll 重新分析。';
         host.append(fallback);
     }
     if (session.repository?.budgetLimited) {
@@ -1557,9 +1560,11 @@ function renderImpactPlan(panel) {
         host.append(group);
     };
 
-    appendRegions('强修改区', plan.focusRegions, false, 'is-focus');
-    appendRegions('关联修改区', plan.linkedRegions, true, 'is-linked');
-    appendRegions('过渡调整区', plan.transitionRegions, true, 'is-transition');
+    if (!plan.fallback) {
+        appendRegions('强修改区', plan.focusRegions, false, 'is-focus');
+        appendRegions('关联修改区', plan.linkedRegions, true, 'is-linked');
+        appendRegions('过渡调整区', plan.transitionRegions, true, 'is-transition');
+    }
 
     if (plan.protectedFacts.length) {
         const group = document.createElement('section');
@@ -1623,7 +1628,7 @@ function updateAuditPresentation(panel) {
         return;
     }
     const decisionNotice = audit.hardBlocked || audit.requiresOverride ? ' · 审计仅作提示，最终由你决定' : '';
-    summary.textContent = `合成稿：强修改 ${audit.counts.focus} 处 · 关联修改 ${audit.counts.linked} 处 · 衔接调整 ${audit.counts.transition} 处 · 疑似越界 ${audit.counts.protected} 处${decisionNotice}`;
+    summary.textContent = `合成稿：强修改 ${audit.counts.focus} 处 · 关联修改 ${audit.counts.linked} 处 · 衔接调整 ${audit.counts.transition} 处 · 疑似越界 ${audit.counts.protected} 处 · 范围未确认 ${audit.counts.unverified ?? 0} 处${decisionNotice}`;
     summary.className = `story-rewriter-audit-summary${audit.hardBlocked ? ' is-blocked' : audit.requiresOverride ? ' is-warning' : ''}`;
     if (!messagesHost) return;
     messagesHost.replaceChildren();
@@ -1666,8 +1671,9 @@ function applyReviewFilter(panel) {
     });
     panel.querySelectorAll('.story-rewriter-diff-card[data-change-id]').forEach(card => {
         card.hidden = filter === 'planned'
-            ? card.dataset.classification === 'protected'
-            : filter === 'protected' ? card.dataset.classification !== 'protected' : false;
+            ? ['protected', 'unverified'].includes(card.dataset.classification)
+            : filter === 'protected' ? card.dataset.classification !== 'protected'
+                : filter === 'unverified' ? card.dataset.classification !== 'unverified' : false;
     });
     panel.querySelectorAll('[data-review-filter]').forEach(button => {
         const active = button.dataset.reviewFilter === filter;
@@ -1779,7 +1785,7 @@ function renderAudit(panel) {
     };
     addAction('上一个', () => jumpReviewChange(panel, -1));
     addAction('下一个', () => jumpReviewChange(panel, 1));
-    for (const [label, filter] of [['全部', 'all'], ['计划内', 'planned'], ['疑似越界', 'protected']]) {
+    for (const [label, filter] of [['全部', 'all'], ['计划内', 'planned'], ['疑似越界', 'protected'], ['范围未确认', 'unverified']]) {
         const button = addAction(label, () => {
             state.session.reviewFilter = filter;
             if (filter !== 'all') {
@@ -1811,7 +1817,7 @@ function renderAudit(panel) {
         applyReviewFilter(panel);
     }, 'story-rewriter-full-toggle');
     full.title = '按原文顺序显示修改块之间未修改的段落；仅影响显示，不改变采用选择';
-    addAction('仅采用计划内', () => setReviewAcceptance(panel, change => change.classification !== 'protected'));
+    addAction('仅采用计划内', () => setReviewAcceptance(panel, change => change.classification !== 'protected' && change.classification !== 'unverified'));
     addAction('全部采用', () => setReviewAcceptance(panel, () => true));
     addAction('全部保留原文', () => setReviewAcceptance(panel, () => false));
     toolbar.append(count, actions);
@@ -1820,7 +1826,7 @@ function renderAudit(panel) {
     messages.className = 'story-rewriter-audit-messages';
     const list = document.createElement('div');
     list.className = 'story-rewriter-review-list';
-    const names = { focus: '强修改', linked: '关联修改', transition: '衔接调整', protected: '疑似越界' };
+    const names = { focus: '强修改', linked: '关联修改', transition: '衔接调整', protected: '疑似越界', unverified: '范围未确认' };
     for (const row of buildReviewDisplayRows(session.reviewBaseline || session.capture.messageText, review)) {
         if (row.kind === 'unchanged') {
             const context = document.createElement('article');
@@ -1929,9 +1935,11 @@ function initializeCandidateReview(panel, candidate, { acceptAll = false, preser
     const session = state.session;
     session.proposalCandidate = candidate;
     session.reviewAudit = createCandidateAudit(session, candidate);
+    if (session.reviewAudit.counts.unverified > 0) session.reviewFilter = 'all';
     session.reviewTouchedIds = new Set();
     session.acceptedChangeIds = new Set(session.reviewAudit.changes
         .filter(change => acceptAll || (change.classification !== 'protected'
+            && change.classification !== 'unverified'
             && !(session.generationIncomplete && change.kind === 'deleted')))
         .map(change => change.id));
     if (preserveCandidate) {
@@ -1982,6 +1990,7 @@ function showCandidate(panel, candidate, instruction, metadata = {}) {
     session.reviewBaseline = baseline;
     session.generationBaseline = baseline;
     session.reviewPlan = cloneValue(session.impactPlan);
+    if (session.reviewPlan.fallback) session.reviewFilter = 'all';
     initializeCandidateReview(panel, candidate);
     const actualCandidate = session.candidate;
     session.requirements.push(instruction);
@@ -2013,10 +2022,13 @@ function showCandidate(panel, candidate, instruction, metadata = {}) {
     updateGenerationBasis(panel);
     switchWorkspaceView(panel, 'changes');
     const autoRejected = session.reviewAudit.changes.filter(change => change.classification === 'protected').length;
-    const filteredNotice = autoRejected ? `已默认保留原文中的 ${autoRejected} 项疑似越界变化。` : '';
+    const unverified = session.reviewAudit.counts.unverified ?? 0;
+    const filteredNotice = (session.reviewPlan.fallback
+        ? `影响分析未完成，修改范围未确认；${unverified} 项未确认变化默认保留原文，请逐块确认或重 Roll 重新分析。` : '')
+        + (autoRejected ? `已默认保留原文中的 ${autoRejected} 项疑似越界变化。` : '');
     const continuationNotice = session.generationSegments > 1 ? `已自动续接 ${session.generationSegments} 段。` : '';
     panel.querySelector('.story-rewriter-status').textContent = session.generationIncomplete
-        ? `候选已保留，但未通过完整性检查。${continuationNotice}${session.generationIncompleteReason || '请检查文章结尾。'}你仍可编辑或确认应用。`
+        ? `候选已保留，但未通过完整性检查。${continuationNotice}${filteredNotice}${session.generationIncompleteReason || '请检查文章结尾。'}你仍可编辑或确认应用。`
         : session.audit?.hardBlocked
             ? `候选已生成。${continuationNotice}${filteredNotice}合成稿仍有高风险项，请逐块确认；你仍可确认后应用。`
             : `候选已生成。${continuationNotice}${filteredNotice}可以逐块确认、继续提出要求，或应用为新版本。`;
@@ -2707,12 +2719,13 @@ async function generateSemanticCandidate(panel) {
             plan = constrainImpactPlan(plan, paragraphs, { maxLinked: 4, maxTransition: 2 });
         }
         session.impactPlan = plan;
+        generationLog('impact_scope_resolved', { outcome: plan.fallback ? 'unverified' : 'confirmed' }, session);
         session.pendingTask = task;
         session.pendingInstruction = instruction;
         renderImpactPlan(panel);
         renderReferences(panel);
         if (plan.fallback) {
-            panel.querySelector('.story-rewriter-status').textContent = `已使用本地保守范围继续生成；请在逐块确认中检查。${plan.fallbackReason ? ` 原因：${plan.fallbackReason}` : ''}`;
+            panel.querySelector('.story-rewriter-status').textContent = `影响分析未完成，修改范围未确认；继续生成供手动审阅，未确认变化默认保留原文。${plan.fallbackReason ? ` 原因：${plan.fallbackReason}` : ''}`;
         }
     } catch (error) {
         console.error('[Story Rewriter] impact analysis failed', error);
@@ -2731,6 +2744,36 @@ async function generateSemanticCandidate(panel) {
         }
     }
     await generateCompleteRevision(panel, instruction);
+}
+
+async function refreshRerollImpactPlan(panel, session, request) {
+    if (!request.impactPlan?.fallback) return;
+    const task = request.task;
+    const limits = session.activeLimits ?? await getActiveGenerationLimits();
+    session.activeLimits = limits;
+    setWorkspaceBusy(panel, true, '重 Roll：重新分析未确认的修改范围…', { cancelable: true });
+    try {
+        const prompt = buildImpactPrompt(task);
+        const promptTokens = await countTokens(prompt);
+        const available = limits.maxContext ? limits.maxContext - promptTokens - 256 : state.settings.analysisResponseLength;
+        if (available < 512) throw new Error('影响分析可用上下文不足');
+        const rawPlan = await generateStructured(prompt, IMPACT_JSON_SCHEMA,
+            Math.min(state.settings.analysisResponseLength, available, limits.maxResponse || Infinity),
+            parseImpactResponse, session, '影响分析');
+        let plan = validateImpactPlan(rawPlan, task.paragraphs, task.focusIds,
+            task.references.map(item => item.id));
+        if (!plan.focusRegions.length) throw new Error('模型未识别出修改重点');
+        if (task.influence === 'strict') plan = constrainImpactPlan(plan, task.paragraphs, { maxLinked: 4, maxTransition: 2 });
+        session.impactPlan = { ...plan, fallback: false, fallbackReason: '' };
+        generationLog('impact_scope_refreshed', { outcome: 'confirmed' }, session);
+    } catch (error) {
+        if (isGenerationCancelled(error) || session.cancelled) throw error;
+        session.impactPlan = { ...session.impactPlan, fallback: true, fallbackReason: String(error?.message ?? error) };
+        generationLog('impact_scope_refreshed', { outcome: 'unverified' }, session);
+    } finally {
+        setWorkspaceBusy(panel, false);
+    }
+    renderImpactPlan(panel);
 }
 
 async function rerollTurn(panel, turn, index) {
@@ -2768,6 +2811,7 @@ async function rerollTurn(panel, turn, index) {
             session.generationBaseline = request.baseline;
             session.impactPlan = cloneValue(request.impactPlan);
             startGenerationSession(session);
+            await refreshRerollImpactPlan(panel, session, request);
             await generateCompleteRevision(panel, request.instruction);
         }
     } catch (error) {
@@ -2800,6 +2844,7 @@ async function rerollTurn(panel, turn, index) {
             }
             input.value = unsent;
         }
+        session.generationInProgress = false;
         finishGenerationDiagnostics(session, session.rerollDiagnosticStatus || (session.cancelled ? 'cancelled' : 'failed'), true);
         session.rerollDiagnosticStatus = null;
         session.rerollLabel = null;

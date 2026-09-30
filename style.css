@@ -554,6 +554,7 @@
 .story-rewriter-diff-card.is-linked { border-color: #dfb94f; }
 .story-rewriter-diff-card.is-transition { border-color: #5aa8df; }
 .story-rewriter-diff-card.is-protected { border-color: #d66b6b; }
+.story-rewriter-diff-card.is-unverified { border-color: #d8b45c; }
 
 .story-rewriter-diff-heading {
     display: flex;

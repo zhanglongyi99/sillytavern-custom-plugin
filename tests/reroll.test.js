@@ -26,9 +26,11 @@ function harness(outcome, kind = 'complete') {
         session.requirements.push('duplicate'); fields['.story-rewriter-instruction'].value = '';
     };
     const reroll = new Function('state', 'cloneValue', 'captureIsCurrent', 'captureCandidateSnapshot', 'startGenerationSession',
-        'generatePreciseCandidate', 'generateCompleteRevision', 'renderImpactPlan', 'renderAudit', 'renderSessionTurns', 'generationLog', 'finishGenerationDiagnostics',
-        source + '; return rerollTurn;')(state, structuredClone, () => true, () => {}, () => {}, generate, generate, () => {}, () => {}, () => {},
-        (event, metadata) => events.push({ event, ...metadata }), () => events.push({ event: 'finalized' }));
+        'generatePreciseCandidate', 'generateCompleteRevision', 'renderImpactPlan', 'renderAudit', 'renderSessionTurns', 'generationLog', 'finishGenerationDiagnostics', 'refreshRerollImpactPlan',
+        source + '; return rerollTurn;')(state, structuredClone, () => true, () => {}, () => { session.generationInProgress = true; }, generate, generate, () => {}, () => {}, () => {},
+        (event, metadata) => events.push({ event, ...metadata }), () => events.push({ event: 'finalized' }), async () => {
+            if (outcome === 'scope_cancel') { session.cancelled = true; throw new Error('analysis cancelled'); }
+        });
     return { session, fields, events, run: () => reroll(panel, turn, 1), seen: () => seen };
 }
 test('reroll reuses the saved input, preserves old candidate and unsent instruction', async () => {
@@ -43,13 +45,14 @@ test('reroll reuses the saved input, preserves old candidate and unsent instruct
     }
 });
 test('failure and cancellation restore candidate and exact decisions', async () => {
-    for (const outcome of ['failure', 'cancel', 'error', 'low_coverage']) {
+    for (const outcome of ['failure', 'cancel', 'error', 'low_coverage', 'scope_cancel']) {
         const h = harness(outcome); await h.run();
         assert.equal(h.session.candidate, 'current chosen draft');
         assert.deepEqual([...h.session.acceptedChangeIds], ['C001']);
         assert.equal(h.session.turns.length, 1);
         assert.equal(h.fields['.story-rewriter-instruction'].value, 'unsent third request');
         assert.equal(h.events[0].disposition, 'restored_previous');
+        assert.equal(h.session.generationInProgress, false);
     }
 });
 test('missing end marker retains admitted reroll for review without losing old candidate', async () => {
