@@ -62,7 +62,7 @@ import {
 
 const EXTENSION_KEY = 'story_rewriter';
 const HISTORY_KEY = 'story_rewriter_history';
-const EXTENSION_VERSION = '0.8.7';
+const EXTENSION_VERSION = '0.8.8';
 const DIAGNOSTICS_STORAGE_KEY = `${EXTENSION_KEY}:diagnostics:v1`;
 const MAX_HISTORY = 5;
 const MAX_SESSION_TURNS = 8;
@@ -256,7 +256,11 @@ function beginDiagnosticRun(session) {
     if (writeDiagnosticStorage(archive)) session.diagnosticRunId = id;
 }
 
-function finishGenerationDiagnostics(session, status) {
+function finishGenerationDiagnostics(session, status, finalizeReroll = false) {
+    if (session?.rerollLabel && !finalizeReroll) {
+        session.rerollDiagnosticStatus = status;
+        return;
+    }
     if (!session?.diagnosticRunId) return;
     generationLog('session_end', { outcome: status }, session);
     const archive = finishDiagnosticRun(
@@ -284,6 +288,7 @@ function generationLog(event, metadata = {}, session = state.session) {
     'progressAccepted', 'progressReason', 'minimumCharacters', 'pendingIssues', 'reviewIssues',
     'interfaceCharacters', 'cleanedCharacters', 'configuredCharacters',
     'generationInterface', 'schemaReturnInvalid', 'hostTextCleanupPossible',
+    'isReroll', 'sourceRound',
 ];
     const safe = Object.fromEntries(allowed
         .filter(key => metadata[key] !== undefined)
@@ -318,7 +323,7 @@ function startGenerationSession(session) {
     session.coverageRepairReason = '';
     session.generationDiagnostics = [];
     beginDiagnosticRun(session);
-    generationLog('session_start', {}, session);
+    generationLog('session_start', { isReroll: Boolean(session.rerollLabel), sourceRound: session.rerollRound }, session);
 }
 
 function cancelGenerationSession(session, message = '已取消本次生成。') {
@@ -2709,6 +2714,8 @@ async function rerollTurn(panel, turn, index) {
     session.rerollRound = turn.roundNumber ?? index + 1;
     session.rerollLabel = turn.rerollOf || `第 ${session.rerollRound} 轮`;
     session.rerollRequest = request;
+    session.rerollDiagnosticStatus = null;
+    let rerollError = false;
     try {
         if (request.kind === 'precise') {
             await generatePreciseCandidate(panel, request);
@@ -2723,10 +2730,18 @@ async function rerollTurn(panel, turn, index) {
             await generateCompleteRevision(panel, request.instruction);
         }
     } catch (error) {
+        rerollError = true;
         if (state.session === session && panel.isConnected) panel.querySelector('.story-rewriter-status').textContent = `重 Roll 失败：${error.message ?? error}`;
     } finally {
         if (state.session === session && panel.isConnected) {
-            const failed = session.turns.at(-1) === oldLast || session.cancelled || (request.kind === 'complete' && session.generationIncomplete);
+            // Candidate admission belongs to the shared generation pipeline. A missing
+            // end marker alone must not discard an already admitted reviewable draft.
+            const failed = session.turns.at(-1) === oldLast || session.cancelled || rerollError;
+            generationLog('reroll_result', {
+                sourceRound: session.rerollRound,
+                disposition: failed ? 'restored_previous' : session.generationIncomplete ? 'retained_for_review' : 'retained_complete',
+                stopReason: session.cancelled ? 'cancelled' : rerollError ? 'error' : failed ? 'no_new_candidate' : session.generationIncomplete ? 'requires_review' : 'completed',
+            }, session);
             if (failed) {
                 Object.assign(session, saved);
                 panel.querySelector('.story-rewriter-candidate').value = session.candidate;
@@ -2738,10 +2753,14 @@ async function rerollTurn(panel, turn, index) {
                 panel.querySelector('.story-rewriter-status').textContent += ' 重 Roll 未产生完整新候选，已保留原候选及选择。';
             } else {
                 session.requirements = saved.requirements;
-                panel.querySelector('.story-rewriter-status').textContent += ' 本轮重 Roll 已完成，旧候选仍可恢复。';
+                panel.querySelector('.story-rewriter-status').textContent += session.generationIncomplete
+                    ? ' 重 Roll 新候选已保留供审阅，请检查结尾；未自动应用，旧候选仍可恢复。'
+                    : ' 本轮重 Roll 已完成，旧候选仍可恢复。';
             }
             input.value = unsent;
         }
+        finishGenerationDiagnostics(session, session.rerollDiagnosticStatus || (session.cancelled ? 'cancelled' : 'failed'), true);
+        session.rerollDiagnosticStatus = null;
         session.rerollLabel = null;
         session.rerollRound = null;
         session.rerollRequest = null;
