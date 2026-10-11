@@ -718,6 +718,7 @@ function closeWorkspace() {
 }
 
 function toggleWorkspaceMaximized(panel) {
+    state.panelResizeCleanup?.();
     const maximized = panel.classList.toggle('is-maximized');
     const button = panel.querySelector('.story-rewriter-maximize');
     if (!button) return;
@@ -730,6 +731,7 @@ function toggleWorkspaceMaximized(panel) {
 
 function setWorkspaceMinimized(panel, minimized) {
     if (!panel?.isConnected) return;
+    state.panelResizeCleanup?.();
     panel.classList.toggle('is-minimized', minimized);
     const bubble = panel.querySelector('.story-rewriter-restore-bubble');
     if (bubble) bubble.hidden = !minimized;

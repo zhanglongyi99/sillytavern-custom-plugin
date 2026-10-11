@@ -152,7 +152,8 @@
 
 .story-rewriter-panel.is-maximized {
     inset: 10px;
-    width: auto;
+    /* Override the inline drag width without losing it when restoring. */
+    width: auto !important;
     min-width: 0;
     max-width: none;
     border: 1px solid var(--SmartThemeBorderColor, #666);
