@@ -44,6 +44,7 @@ import {
 } from './lib/semantic.js';
 import { appendRevisionSwipe } from './lib/swipe.js';
 import { diffInline } from './lib/inline-diff.js';
+import { revisionBudget } from './lib/revision-budget.js';
 import { parseStructuredResponse, structuredFailureMessage, structuredRetryHint, createHostJsonSchema, isSchemaUnsupported, structuredOutputBudget } from './lib/structured-response.js';
 import { REVIEW_SCHEMA, buildReviewPrompt, parseReview, reviewPlan, buildReviewRepairInstruction, budgetReviewReferences, repairReviewReferences, assessReviewRepair, reviewEvidence } from './lib/review.js';
 import {
@@ -281,6 +282,7 @@ function generationLog(event, metadata = {}, session = state.session) {
         'elapsedMs', 'responseCharacters', 'providerCharacters', 'usableCharacters',
         'pluginPromptCharacters', 'pluginPromptFingerprint', 'complete',
         'errorCode', 'stopReason', 'parseOutcome', 'coverageRatio',
+        'estimatedOutput', 'totalLimit', 'usedTokens', 'remainingTokens',
         'retrievalItems', 'retrievalCharacters', 'contextLimit', 'responseLimit',
         'limitSource', 'outcome', 'baseMode', 'disposition',
         'baselineFingerprint', 'candidateFingerprint', 'equivalent',
@@ -2077,6 +2079,7 @@ async function generateCompleteRevision(panel, instruction) {
         updateContextSummary(panel);
         const originalTokens = await countTokens(baseline);
         const desiredResponseLength = desiredRevisionTokens(originalTokens);
+        const totalRevisionLimit = state.settings.fullResponseLength;
         const revisionHistory = session.rerollRequest?.history ?? resolveRevisionHistory(
             baseMode,
             panel.querySelector('.story-rewriter-candidate').value.trim() || session.candidate,
@@ -2093,7 +2096,8 @@ async function generateCompleteRevision(panel, instruction) {
         const singleResponseLimit = limits.maxResponse || desiredResponseLength;
         const runRevision = async (initialPrompt, stageLabel) => {
             session.activeRevisionStage = stageLabel;
-            let remainingBudget = desiredResponseLength;
+            let remainingBudget = totalRevisionLimit;
+            let usedTokens = 0;
             let prompt = initialPrompt;
             let assembled = '';
             let complete = false;
@@ -2104,12 +2108,18 @@ async function generateCompleteRevision(panel, instruction) {
                 const promptTokens = await countTokens(prompt);
                 const availableOutput = maxContext ? Math.floor(maxContext - promptTokens - 512) : remainingBudget;
                 const minimumOutput = segments === 0 ? 512 : 256;
-                const responseLength = Math.min(remainingBudget, availableOutput, singleResponseLimit);
+                const budget = revisionBudget({ estimatedOutput: desiredResponseLength,
+                    totalLimit: totalRevisionLimit, usedTokens,
+                    contextAvailable: availableOutput, responseLimit: singleResponseLimit });
+                const responseLength = budget.request;
+                generationLog('revision_budget', { stage: stageLabel, segment: segments + 1,
+                    estimatedOutput: desiredResponseLength, totalLimit: totalRevisionLimit,
+                    usedTokens, remainingTokens: budget.remaining, responseLength }, session);
                 if (availableOutput < minimumOutput || responseLength < minimumOutput) {
                     if (!assembled) {
                         throw new Error(`完整候选请求至少需要 ${formatTokenCount(promptTokens + minimumOutput)} 上下文和 ${formatTokenCount(minimumOutput)} 单次响应空间。请检查当前预设上限，或缩短原文与资料。`);
                     }
-                    stopReason = 'budget_exhausted';
+                    stopReason = budget.stopReason || 'response_limit';
                     break;
                 }
                 let parsed = { text: '', complete: false };
@@ -2204,14 +2214,15 @@ async function generateCompleteRevision(panel, instruction) {
                 }
                 complete = parsed.complete;
                 segments++;
+                usedTokens = await countTokens(assembled);
+                remainingBudget = revisionBudget({ estimatedOutput: desiredResponseLength,
+                    totalLimit: totalRevisionLimit, usedTokens }).remaining;
                 savePartialCheckpoint(session, assembled, segments, { complete, stage: stageLabel });
                 if (complete) {
                     stopReason = 'completed';
                     break;
                 }
 
-                const usedTokens = await countTokens(assembled);
-                remainingBudget = Math.max(0, desiredResponseLength - usedTokens);
                 if (remainingBudget < 256) {
                     stopReason = 'budget_exhausted';
                     break;
@@ -2226,6 +2237,9 @@ async function generateCompleteRevision(panel, instruction) {
                 responseCharacters: assembled.length,
                 complete,
                 stopReason,
+                totalLimit: totalRevisionLimit,
+                usedTokens,
+                remainingTokens: remainingBudget,
             }, session);
             return { assembled, complete, segments, stopReason, sourceStage: stageLabel };
         };
@@ -2331,7 +2345,11 @@ async function generateCompleteRevision(panel, instruction) {
             ? result.stopReason === 'segment_limit'
                 ? `已达到最多 ${MAX_REVISION_SEGMENTS} 个续接分段，仍未收到正文结束标记。请检查文章结尾。`
                 : result.stopReason === 'budget_exhausted'
-                    ? '完整候选已用完本轮总预算，但未收到正文结束标记。请检查文章结尾。'
+                    ? `完整候选已达到插件设置的累计正文额度（${formatTokenCount(totalRevisionLimit)}，按本地估算，非账单用量），但未收到正文结束标记。请检查结尾，或调高完整候选额度后重试。`
+                    : result.stopReason === 'context_exhausted'
+                        ? '当前请求的剩余上下文空间不足以继续输出，尚未收到正文结束标记。请检查预设上下文上限与资料长度。'
+                    : result.stopReason === 'response_limit'
+                        ? '当前预设的单次响应空间不足，尚未收到正文结束标记。请检查响应上限。'
                     : ['no_progress', 'reasoning_only'].includes(result.stopReason)
                         ? '续接未产生足够的可用文本，已停止无效调用。请检查文章结尾；尚不能确定是模型输出还是解析问题。'
                     : '没有收到正文结束标记，模型可能已结束，也可能仍被截断。请检查文章结尾。'
