@@ -18,6 +18,7 @@ test('persists retry strategy and review validation without saving story text', 
         recoveryStrategy: 'compact', maximumAttempts: 3,
         progressAccepted: false, progressReason: 'insufficient_progress', minimumCharacters: 395,
         interfaceCharacters: 200, cleanedCharacters: 100, configuredCharacters: 0,
+        configuredReasoningCharacters: 200, reasoningParserFailed: false, upstreamMetadataAvailable: false,
         generationInterface: 'quiet', schemaReturnInvalid: true, hostTextCleanupPossible: false,
         isReroll: true, sourceRound: 2, disposition: 'retained_for_review',
         story: 'private', report: { secret: true },
@@ -30,6 +31,9 @@ test('persists retry strategy and review validation without saving story text', 
     assert.equal(event.interfaceCharacters, 200);
     assert.equal(event.cleanedCharacters, 100);
     assert.equal(event.configuredCharacters, 0);
+    assert.equal(event.configuredReasoningCharacters, 200);
+    assert.equal(event.reasoningParserFailed, false);
+    assert.equal(event.upstreamMetadataAvailable, false);
     assert.equal(event.schemaReturnInvalid, true);
     assert.equal(event.hostTextCleanupPossible, false);
     assert.equal(event.generationInterface, 'quiet');

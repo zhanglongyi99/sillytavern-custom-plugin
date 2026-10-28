@@ -340,6 +340,30 @@ test('does not count empty or tiny unterminated replies as revision progress', (
     }).accepted, true);
 });
 
+test('unmarked initial fragments cannot become a continuation prefix merely by length', () => {
+    const fragment = 'This is a delivery acknowledgement. '.repeat(8);
+    for (const parseOutcome of ['plain', 'configured_content']) {
+        const result = assessRevisionSegmentProgress({ text: fragment, complete: false, parseOutcome }, {
+            originalCharacters: 14000,
+        });
+        assert.equal(result.accepted, false);
+        assert.equal(result.reason, 'body_boundary_missing');
+    }
+    for (const parseOutcome of ['body_protocol', 'final_protocol', 'configured_protocol_recovery']) {
+        assert.equal(assessRevisionSegmentProgress({ text: fragment, complete: false, parseOutcome }, {
+            originalCharacters: 14000,
+        }).accepted, true);
+    }
+    // A complete unmarked response and a continuation of an established draft
+    // remain supported; completeness checks still run before adoption.
+    assert.equal(assessRevisionSegmentProgress({ text: fragment, complete: true, parseOutcome: 'plain' }, {
+        originalCharacters: 14000,
+    }).accepted, true);
+    assert.equal(assessRevisionSegmentProgress({ text: fragment, complete: false, parseOutcome: 'plain' }, {
+        originalCharacters: 14000, assembledCharacters: 5000,
+    }).accepted, true);
+});
+
 test('builds a continuation request and removes duplicated overlap', () => {
     const task = {
         instruction: '继续完成同一篇文章',

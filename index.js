@@ -291,6 +291,7 @@ function generationLog(event, metadata = {}, session = state.session) {
     'retryAttempt', 'retryReason', 'recoveryStrategy', 'maximumAttempts',
     'progressAccepted', 'progressReason', 'minimumCharacters', 'pendingIssues', 'reviewIssues',
     'interfaceCharacters', 'cleanedCharacters', 'configuredCharacters',
+    'configuredReasoningCharacters', 'reasoningParserFailed', 'upstreamMetadataAvailable',
     'generationInterface', 'schemaReturnInvalid', 'hostTextCleanupPossible',
     'isReroll', 'sourceRound',
 ];
@@ -2150,12 +2151,32 @@ async function generateCompleteRevision(panel, instruction) {
                         recoveryStrategy,
                         maximumAttempts,
                     });
-                    parsed = parseRevisionProviderResponse(raw, value => state.context?.parseReasoningFromString?.(value, { strict: false }));
+                    const responseDiagnostics = {
+                        interfaceCharacters: raw.length,
+                        generationInterface: session.contextMode === 'tavern' && typeof state.context.generateQuietPrompt === 'function' ? 'quiet' : 'raw',
+                        // These host APIs return text, not the HTTP response or usage.
+                        upstreamMetadataAvailable: false,
+                        reasoningParserFailed: false,
+                    };
+                    parsed = parseRevisionProviderResponse(raw, value => {
+                        try {
+                            const split = state.context?.parseReasoningFromString?.(value, { strict: false });
+                            if (split) {
+                                responseDiagnostics.configuredCharacters = String(split.content ?? '').length;
+                                responseDiagnostics.configuredReasoningCharacters = String(split.reasoning ?? '').length;
+                            }
+                            return split;
+                        } catch (error) {
+                            responseDiagnostics.reasoningParserFailed = true;
+                            throw error;
+                        }
+                    });
                     progress = assessRevisionSegmentProgress(parsed, {
                         assembledCharacters: assembled.length,
                         originalCharacters: baseline.length,
                     });
                     generationLog('parsed', {
+                        ...responseDiagnostics,
                         stage: stageLabel,
                         segment: segments + 1,
                         attempt: emptyAttempt + 1,
@@ -2203,7 +2224,12 @@ async function generateCompleteRevision(panel, instruction) {
                         minimumCharacters: progress.minimumCharacters,
                     }, session);
                     if (!assembled) {
-                        throw new Error(`${stageLabel}多次未返回足够的可用文本，标准与精简协议均未成功。现有返回不足以确定原因，请查看诊断记录中的响应长度与解析结果。`);
+                        const detail = progress.reason === 'body_boundary_missing'
+                            ? '收到未标明正文边界的文本，未将其当作正文启动续接。'
+                            : progress.reason === 'reasoning_only'
+                                ? '酒馆配置的解析器仅识别到推理部分，没有可用正文。'
+                                : '收到空文本或不足以形成正文的短回复。';
+                        throw new Error(`${stageLabel}未生成有效候选：${detail}已保留当前候选。本轮停止原因：${progress.reason}。接口仅提供处理后的文本，尚不能据此判断上游结束原因或实际输出用量。`);
                     }
                     break;
                 }
